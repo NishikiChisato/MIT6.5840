@@ -107,11 +107,17 @@ func (c *Coordinator) HandleRequest(args *RequestArgs, reply *RequestReply) erro
 func (c *Coordinator) HandleRespond(args *RespondArgs, reply *RespondReply) error {
 	//fmt.Println("Coordinator HandleRespond Call")
 	c.latch_.Lock()
-	if args.Task_types == MapType && args.Map_task_.Status_ == Completed {
-		c.map_queue_[args.Map_task_.Task_id_].Status_ = Completed
+	if args.Task_types == MapType {
+		c.map_queue_[args.Map_task_.Task_id_].Timestamp_ = time.Now()
+		if args.Map_task_.Status_ == Completed {
+			c.map_queue_[args.Map_task_.Task_id_].Status_ = Completed
+		}
 	}
-	if args.Task_types == ReduceType && args.Reduce_task_.Status_ == Completed {
-		c.reduce_queue_[args.Reduce_task_.Task_id_].Status_ = Completed
+	if args.Task_types == ReduceType {
+		c.reduce_queue_[args.Reduce_task_.Task_id_].Timestamp_ = time.Now()
+		if args.Reduce_task_.Status_ == Completed {
+			c.reduce_queue_[args.Reduce_task_.Task_id_].Status_ = Completed
+		}
 	}
 	c.latch_.Unlock()
 	return nil

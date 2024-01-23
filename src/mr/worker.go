@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
-	"log"
 	"net/rpc"
 	"os"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,6 +22,7 @@ type KeyValue struct {
 }
 
 var (
+	ErrInit   = errors.New("Init")
 	ErrMap    = errors.New("map fatal")
 	ErrReduce = errors.New("reduce fatal")
 )
@@ -55,7 +56,8 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	// CallExample()
 
 	var cur_task_type TaskType = NotAssigned
-	var has_error error
+	var success_call atomic.Value
+	success_call.Store(false)
 	for {
 		req := CallRequest()
 		cur_task_type = req.Task_type_
@@ -63,12 +65,35 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		case NotAssigned:
 			time.Sleep(time.Second)
 		case MapType:
-			has_error = MapFunction(&req, mapf)
+			go func() {
+				for success_call.CompareAndSwap(false, false) {
+					nor_rsp := RespondArgs{}
+					nor_rsp.Task_types = cur_task_type
+					nor_rsp.Map_task_ = MapInfo{File_name_: req.Map_task_.File_name_,
+						Task_id_: req.Map_task_.Task_id_,
+						Status_:  InProgress,
+						Type_:    req.Map_task_.Type_}
+					CallRespond(&nor_rsp)
+					time.Sleep(5 * time.Second)
+				}
+			}()
+			success_call.Store(MapFunction(&req, mapf))
 		case ReduceType:
-			has_error = ReduceFunction(&req, reducef)
+			go func() {
+				for success_call.CompareAndSwap(false, false) {
+					nor_rsp := RespondArgs{}
+					nor_rsp.Task_types = cur_task_type
+					nor_rsp.Reduce_task_ = ReduceInfo{Task_id_: req.Reduce_task_.Task_id_,
+						Status_: InProgress,
+						Type_:   req.Reduce_task_.Type_}
+					CallRespond(&nor_rsp)
+					time.Sleep(5 * time.Second)
+				}
+			}()
+			success_call.Store(ReduceFunction(&req, reducef))
 		}
 
-		if cur_task_type != NotAssigned && has_error == nil {
+		if cur_task_type != NotAssigned && success_call.CompareAndSwap(true, false) {
 			rsp_args := RespondArgs{}
 			rsp_args.Task_types = cur_task_type
 			switch cur_task_type {
@@ -89,16 +114,16 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 }
 
-func MapFunction(req *RequestReply, mapf func(string, string) []KeyValue) error {
+func MapFunction(req *RequestReply, mapf func(string, string) []KeyValue) bool {
 	file, err := os.Open(req.Map_task_.File_name_)
 	if err != nil {
 		//log.Fatalf("cannot open %v\n", req.Map_task_.File_name_)
-		return ErrMap
+		return false
 	}
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
 		//log.Fatalf("cannot read %v\n", req.Map_task_.File_name_)
-		return ErrMap
+		return false
 	}
 	file.Close()
 	kva := mapf(req.Map_task_.File_name_, string(content))
@@ -106,36 +131,45 @@ func MapFunction(req *RequestReply, mapf func(string, string) []KeyValue) error 
 	for _, kv := range kva {
 		groups[ihash(kv.Key)%req.NReduce_] = append(groups[ihash(kv.Key)%req.NReduce_], kv)
 	}
-	// create tmp file
+	// create tmp file list and encoder list
 	tfile_list := []*os.File{}
+	enc_list := []*json.Encoder{}
 	for i := 0; i < req.NReduce_; i++ {
-		tfilename := fmt.Sprintf("mr-%d-%d", req.Map_task_.Task_id_, i)
-		tfile, _ := os.Create(tfilename)
+		//tfile, _ := os.Create(tfilename)
+		tfile, _ := os.CreateTemp("./", "tmp-mr-")
 		defer tfile.Close()
 		tfile_list = append(tfile_list, tfile)
+		enc_list = append(enc_list, json.NewEncoder(tfile))
 	}
+
+	// encode
 	for idx, vals := range groups {
-		enc := json.NewEncoder(tfile_list[idx])
+		enc := enc_list[idx]
 		for _, kv := range vals {
 			err := enc.Encode(&kv)
 			if err != nil {
 				//log.Fatalf("encode error: [file name]: %v\n", tfile_list[idx])
-				return ErrMap
+				return false
 			}
 		}
 	}
-	return nil
+	for i := 0; i < req.NReduce_; i++ {
+		tfilename := fmt.Sprintf("mr-%d-%d", req.Map_task_.Task_id_, i)
+		if err := os.Rename(tfile_list[i].Name(), tfilename); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
-func ReduceFunction(req *RequestReply, reducef func(string, []string) string) error {
+func ReduceFunction(req *RequestReply, reducef func(string, []string) string) bool {
 	kva := []KeyValue{}
 	for i := 0; i < req.NMap_; i++ {
-		//ifilename := "mr-" + strconv.Itoa(i) + "-" + strconv.Itoa(req.Reduce_task_.Task_id_)
 		ifilename := fmt.Sprintf("mr-%d-%d", i, req.Reduce_task_.Task_id_)
 		ifile, err := os.Open(ifilename)
 		if err != nil {
 			//log.Fatalf("cannot open %v\n", ifilename)
-			return ErrReduce
+			return false
 		}
 		dec := json.NewDecoder(ifile)
 		for {
@@ -147,7 +181,6 @@ func ReduceFunction(req *RequestReply, reducef func(string, []string) string) er
 		}
 	}
 	sort.Sort(ByKey(kva))
-	//ofilename := "mr-out-" + strconv.Itoa(req.Reduce_task_.Task_id_)
 	ofilename := fmt.Sprintf("mr-out-%d", req.Reduce_task_.Task_id_)
 	ofile, _ := os.Create(ofilename)
 	defer ofile.Close()
@@ -170,7 +203,7 @@ func ReduceFunction(req *RequestReply, reducef func(string, []string) string) er
 		i = j
 	}
 
-	return nil
+	return true
 }
 
 func CallRequest() RequestReply {
@@ -192,7 +225,8 @@ func CallRequest() RequestReply {
 		}
 	*/
 	if !ok {
-		log.Fatalln("request failed")
+		//log.Fatalln("request failed")
+		os.Exit(-1)
 	}
 	return reply
 }
@@ -208,7 +242,8 @@ func CallRespond(args *RespondArgs) {
 		}
 	*/
 	if !ok {
-		log.Fatalln("respond failed")
+		//log.Fatalln("respond failed")
+		os.Exit(-1)
 	}
 }
 
