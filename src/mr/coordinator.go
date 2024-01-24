@@ -12,7 +12,6 @@ import (
 
 type TaskStatus int
 type TaskType int
-type MassageType int
 
 const (
 	// Task status
@@ -104,7 +103,7 @@ func (c *Coordinator) HandleRequest(args *RequestArgs, reply *RequestReply) erro
 	return nil
 }
 
-func (c *Coordinator) HandleRespond(args *RespondArgs, reply *RespondReply) error {
+func (c *Coordinator) HandleResponse(args *ResponseArgs, reply *ResponseReply) error {
 	//fmt.Println("Coordinator HandleRespond Call")
 	c.latch_.Lock()
 	if args.Task_types == MapType {

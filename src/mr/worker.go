@@ -67,13 +67,13 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		case MapType:
 			go func() {
 				for success_call.CompareAndSwap(false, false) {
-					nor_rsp := RespondArgs{}
+					nor_rsp := ResponseArgs{}
 					nor_rsp.Task_types = cur_task_type
 					nor_rsp.Map_task_ = MapInfo{File_name_: req.Map_task_.File_name_,
 						Task_id_: req.Map_task_.Task_id_,
 						Status_:  InProgress,
 						Type_:    req.Map_task_.Type_}
-					CallRespond(&nor_rsp)
+					CallResponse(&nor_rsp)
 					time.Sleep(5 * time.Second)
 				}
 			}()
@@ -81,12 +81,12 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		case ReduceType:
 			go func() {
 				for success_call.CompareAndSwap(false, false) {
-					nor_rsp := RespondArgs{}
+					nor_rsp := ResponseArgs{}
 					nor_rsp.Task_types = cur_task_type
 					nor_rsp.Reduce_task_ = ReduceInfo{Task_id_: req.Reduce_task_.Task_id_,
 						Status_: InProgress,
 						Type_:   req.Reduce_task_.Type_}
-					CallRespond(&nor_rsp)
+					CallResponse(&nor_rsp)
 					time.Sleep(5 * time.Second)
 				}
 			}()
@@ -94,7 +94,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		}
 
 		if cur_task_type != NotAssigned && success_call.CompareAndSwap(true, false) {
-			rsp_args := RespondArgs{}
+			rsp_args := ResponseArgs{}
 			rsp_args.Task_types = cur_task_type
 			switch cur_task_type {
 			case MapType:
@@ -102,12 +102,12 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 					Task_id_: req.Map_task_.Task_id_,
 					Status_:  Completed,
 					Type_:    req.Map_task_.Type_}
-				CallRespond(&rsp_args)
+				CallResponse(&rsp_args)
 			case ReduceType:
 				rsp_args.Reduce_task_ = ReduceInfo{Task_id_: req.Reduce_task_.Task_id_,
 					Status_: Completed,
 					Type_:   req.Reduce_task_.Type_}
-				CallRespond(&rsp_args)
+				CallResponse(&rsp_args)
 			}
 		}
 	}
@@ -182,7 +182,7 @@ func ReduceFunction(req *RequestReply, reducef func(string, []string) string) bo
 	}
 	sort.Sort(ByKey(kva))
 	ofilename := fmt.Sprintf("mr-out-%d", req.Reduce_task_.Task_id_)
-	ofile, _ := os.Create(ofilename)
+	ofile, _ := os.CreateTemp("./", "tmp-mr-out-")
 	defer ofile.Close()
 
 	i := 0
@@ -201,6 +201,10 @@ func ReduceFunction(req *RequestReply, reducef func(string, []string) string) bo
 		fmt.Fprintf(ofile, "%v %v\n", kva[i].Key, output)
 
 		i = j
+	}
+
+	if err := os.Rename(ofile.Name(), ofilename); err != nil {
+		return false
 	}
 
 	return true
@@ -231,9 +235,9 @@ func CallRequest() RequestReply {
 	return reply
 }
 
-func CallRespond(args *RespondArgs) {
-	reply := RespondReply{}
-	ok := call("Coordinator.HandleRespond", args, &reply)
+func CallResponse(args *ResponseArgs) {
+	reply := ResponseReply{}
+	ok := call("Coordinator.HandleResponse", args, &reply)
 	/*
 		if ok {
 			log.Println("respond success")

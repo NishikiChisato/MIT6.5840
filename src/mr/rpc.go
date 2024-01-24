@@ -37,13 +37,13 @@ type RequestReply struct {
 	Reduce_task_ ReduceInfo
 }
 
-type RespondArgs struct {
+type ResponseArgs struct {
 	Task_types   TaskType
 	Map_task_    MapInfo
 	Reduce_task_ ReduceInfo
 }
 
-type RespondReply struct {
+type ResponseReply struct {
 }
 
 // Cook up a unique-ish UNIX-domain socket name
