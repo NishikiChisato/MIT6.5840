@@ -20,7 +20,6 @@ package raft
 import (
 	//	"bytes"
 
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -191,6 +190,261 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
+// auxiliary function
+// leader is 0, candidate is 1, follower is 2
+// use required with lock
+func (rf *Raft) isLeader() bool {
+	rf.mu.Lock()
+	z := rf.state
+	rf.mu.Unlock()
+	return z == Leader
+}
+
+func (rf *Raft) isCandidate() bool {
+	rf.mu.Lock()
+	z := rf.state
+	rf.mu.Unlock()
+	return z == Candidate
+}
+
+func (rf *Raft) isFollower() bool {
+	rf.mu.Lock()
+	z := rf.state
+	rf.mu.Unlock()
+	return z == Follower
+}
+
+func (rf *Raft) getCnt() int {
+	rf.mu.Lock()
+	z := rf.cnt
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) getServerId() int {
+	rf.mu.Lock()
+	z := rf.server_id
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) setState(new_state ServerState) {
+	rf.mu.Lock()
+	rf.state = new_state
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) getCurrentIndex() int {
+	rf.mu.Lock()
+	z := rf.current_index
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) setCurrentIndex(idx int) {
+	rf.mu.Lock()
+	rf.current_index = idx
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) addCurrentIndex() {
+	rf.mu.Lock()
+	rf.current_index++
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) getCurrentTerm() int {
+	rf.mu.Lock()
+	z := rf.current_term
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) setCurrentTerm(term int) {
+	rf.mu.Lock()
+	rf.current_term = term
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) addCurrentTerm() {
+	rf.mu.Lock()
+	rf.current_term++
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) getCommittedIndex() int {
+	rf.mu.Lock()
+	z := rf.committed_index
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) setCommittedIndex(idx int) {
+	rf.mu.Lock()
+	rf.committed_index = idx
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) addCommittedIndex() {
+	rf.mu.Lock()
+	rf.committed_index++
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) getLastApplied() int {
+	rf.mu.Lock()
+	z := rf.last_applied
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) setLastApplied(idx int) {
+	rf.mu.Lock()
+	rf.last_applied = idx
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) addLastApplied() {
+	rf.mu.Lock()
+	rf.last_applied++
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) getElectionRounds() int {
+	rf.mu.Lock()
+	z := rf.election_rounds
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) addElectionRounds() {
+	rf.mu.Lock()
+	rf.election_rounds++
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) setElectionRounds(val int) {
+	rf.mu.Lock()
+	rf.election_rounds = val
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) resetElectionTimeout() {
+	rf.mu.Lock()
+	rf.leader_election_timestamp = time.Now()
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) resetHeartbeatTimeout() {
+	rf.mu.Lock()
+	rf.heart_beat_timestamp = time.Now()
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) isVoteFor() bool {
+	rf.mu.Lock()
+	z := rf.vote_for
+	rf.mu.Unlock()
+	return z == -1
+}
+
+func (rf *Raft) setVoteFor(id int) {
+	rf.mu.Lock()
+	rf.vote_for = id
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) applyLogEntry(index int) {
+	rf.mu.Lock()
+	rf.tester <- ApplyMsg{CommandValid: true, Command: rf.logs[index].Command, CommandIndex: index}
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) getLogs() []*LogType {
+	rf.mu.Lock()
+	logs := rf.logs
+	rf.mu.Unlock()
+	return logs
+}
+
+func (rf *Raft) getLogLen() int {
+	rf.mu.Lock()
+	z := len(rf.logs)
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) getLogEntry(idx int) LogType {
+	rf.mu.Lock()
+	z := rf.logs[idx]
+	rf.mu.Unlock()
+	return *z
+}
+
+func (rf *Raft) appendLogEntry(val LogType) {
+	rf.mu.Lock()
+	rf.logs = append(rf.logs, &val)
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) setLogs(val []*LogType) {
+	rf.mu.Lock()
+	rf.logs = val
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) getNextIndex() map[int]int {
+	rf.mu.Lock()
+	z := rf.next_index
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) getMatchIndex() map[int]int {
+	rf.mu.Lock()
+	z := rf.match_index
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) addNextIndex(idx, val int) {
+	rf.mu.Lock()
+	rf.next_index[idx] += val
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) setNextIndex(idx, val int) {
+	rf.mu.Lock()
+	rf.next_index[idx] = val
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) addMatchIndex(idx, val int) {
+	rf.mu.Lock()
+	rf.match_index[idx] += val
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) setMatchIndex(idx, val int) {
+	rf.mu.Lock()
+	rf.match_index[idx] = val
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) getLeaderElectionTimestamp() time.Time {
+	rf.mu.Lock()
+	z := rf.leader_election_timestamp
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) getHeartbeatTimestamp() time.Time {
+	rf.mu.Lock()
+	z := rf.heart_beat_timestamp
+	rf.mu.Unlock()
+	return z
+}
+
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
@@ -211,70 +465,69 @@ type RequestVoteReply struct {
 	Debug_Info string
 }
 
+func (rf *Raft) RequestVoteCondition(args *RequestVoteArgs) bool {
+	rf.mu.Lock()
+	z := args.Last_Log_Term > rf.logs[rf.last_applied].Term || (args.Last_Log_Term == rf.logs[rf.last_applied].Term && args.Last_Log_Index >= rf.last_applied)
+	rf.mu.Unlock()
+	return z
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	rf.mu.Lock()
 	if rf.isFollower() {
 		if args.Candidate_term < rf.current_term {
-			rf.mu.Unlock()
-			reply.Reply_Term = rf.current_term
+			reply.Reply_Term = rf.getCurrentTerm()
 			reply.Vote_Grant = false
-			reply.Debug_Info = "candidate's term is lower than server's"
+			//reply.Debug_Info = "candidate's term is lower than server's"
 			return
 		}
-		if args.Candidate_Election_Rounds == rf.election_rounds {
-			reply.Reply_Term = rf.current_term
+		if args.Candidate_Election_Rounds == rf.getElectionRounds() {
+			reply.Reply_Term = rf.getCurrentTerm()
 			reply.Vote_Grant = false
 			//reply.Debug_Info = "current server has vote yet"
-			reply.Debug_Info = fmt.Sprintf("current server has vote yet, [server rounds]: %v", rf.election_rounds)
-			rf.mu.Unlock()
+			//reply.Debug_Info = fmt.Sprintf("current server has vote yet, [server rounds]: %v", rf.election_rounds)
 			return
 		} else {
-			rf.election_rounds = args.Candidate_Election_Rounds
-			rf.vote_for = -1
-			rf.mu.Unlock()
+			rf.setElectionRounds(args.Candidate_Election_Rounds)
+			rf.setVoteFor(-1)
 		}
-		rf.mu.Lock()
 		// DPrintf(colorCyan+"[vote]: %v, [last term]: %v, [current term]: %v, [last index]: %v, [current index]: %v\n", rf.vote_for, args.Last_Log_Term, rf.logs[rf.current_index].Term, args.Last_Log_Index, rf.current_index)
 		// we should use last log term and last log index to compare
-		if rf.vote_for == -1 && (args.Last_Log_Term > rf.logs[rf.last_applied].Term || (args.Last_Log_Term == rf.logs[rf.last_applied].Term && args.Last_Log_Index >= rf.last_applied)) {
-			rf.leader_election_timestamp = time.Now()
-			rf.vote_for = args.Candidate_Id
-			rf.current_term = args.Candidate_term
-			rf.mu.Unlock()
+		if rf.isVoteFor() && rf.RequestVoteCondition(args) {
+			rf.resetElectionTimeout()
+			rf.setVoteFor(args.Candidate_Id)
+			rf.setCurrentTerm(args.Candidate_term)
 
 			reply.Reply_Term = rf.current_term
 			reply.Vote_Grant = true
 			reply.Debug_Info = "vote success"
 		} else {
-			rf.current_term = args.Candidate_term
-			rf.mu.Unlock()
-			reply.Reply_Term = rf.current_term
+			rf.setCurrentTerm(args.Candidate_term)
+
+			reply.Reply_Term = rf.getCurrentTerm()
 			reply.Vote_Grant = false
-			reply.Debug_Info = "candidate's log lags behind server's"
+			//reply.Debug_Info = "candidate's log lags behind server's"
 		}
 	} else if rf.isCandidate() {
-		if args.Candidate_term > rf.current_term {
-			rf.leader_election_timestamp = time.Now()
-			rf.current_term = args.Candidate_term
-			rf.state = Follower
+		if args.Candidate_term > rf.getCurrentTerm() {
+			rf.resetElectionTimeout()
+			rf.setCurrentTerm(args.Candidate_term)
+			rf.setState(Follower)
 		}
-		rf.mu.Unlock()
-		reply.Reply_Term = rf.current_term
+		reply.Reply_Term = rf.getCurrentTerm()
 		reply.Vote_Grant = false
-		reply.Debug_Info = "server is candidate, not vote"
+		//reply.Debug_Info = "server is candidate, not vote"
 	} else if rf.isLeader() {
 		// leader
-		if args.Candidate_term > rf.current_term {
-			rf.leader_election_timestamp = time.Now()
-			rf.current_term = args.Candidate_term
-			rf.state = Follower
+		if args.Candidate_term > rf.getCurrentTerm() {
+			rf.resetElectionTimeout()
+			rf.setCurrentTerm(args.Candidate_term)
+			rf.setState(Follower)
 		}
-		rf.mu.Unlock()
-		reply.Reply_Term = rf.current_term
+		reply.Reply_Term = rf.getCurrentTerm()
 		reply.Vote_Grant = false
-		reply.Debug_Info = "server is leader, not vote"
+		//reply.Debug_Info = "server is leader, not vote"
 	}
 }
 
@@ -288,63 +541,89 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Reply_term        int         // server's term, used for leader to update its own term(but it will revert to follower if condition satified)
-	Success           bool        // indicate success of current RPC(true is success)
-	Server_Identifier ServerState // the identification of server
-	Debug_Info        string
+	Reply_term     int  // server's term, used for leader to update its own term(but it will revert to follower if condition satified)
+	Success        bool // indicate success of current RPC(true is success)
+	Identification ServerState
+	Xterm          int // for fast recovery
+	XIndex         int
+	Debug_Info     string
+}
+
+func (rf *Raft) AppendEntriesCondition(args *AppendEntriesArgs) bool {
+	rf.mu.Lock()
+	z := (args.Prev_Log_Index < len(rf.logs) && args.Prev_Log_Index >= 0 && rf.logs[args.Prev_Log_Index].Term != args.Prev_Log_Term)
+	rf.mu.Unlock()
+	return z
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
 	if rf.isFollower() {
-		if args.Leader_term < rf.current_term {
-			rf.mu.Unlock()
-			reply.Reply_term = rf.current_term
+		if args.Leader_term < rf.getCurrentTerm() {
+			reply.Reply_term = rf.getCurrentTerm()
 			reply.Success = false
-			reply.Server_Identifier = Follower
-			reply.Debug_Info = "[server]: follower, leader's term is lower than follower's"
+			reply.Xterm = -1
+			reply.XIndex = rf.getLogLen()
+			reply.Identification = Follower
+			//reply.Debug_Info = "[server]: follower, leader's term is lower than follower's"
 			return
 		}
 
-		if args.Leader_committed_index < rf.last_applied {
-			rf.mu.Unlock()
+		if args.Leader_committed_index < rf.getLastApplied() {
 			// we can not reset election_timeout
-			reply.Reply_term = rf.current_term
+			reply.Reply_term = rf.getCurrentTerm()
 			reply.Success = false
-			reply.Server_Identifier = Follower
-			reply.Debug_Info = "[server]: follower, leader inconsistency"
+			reply.Xterm = -1
+			reply.XIndex = rf.getLogLen()
+			reply.Identification = Follower
+			//reply.Debug_Info = "[server]: follower, leader inconsistency"
 			return
 		}
 
 		// reset election timeout
-		rf.leader_election_timestamp = time.Now()
+		rf.resetElectionTimeout()
 
 		if len(args.Entries) == 0 {
 			// update server's term
-			rf.current_term = args.Leader_term
+			rf.setCurrentTerm(args.Leader_term)
 			// reset server's vote_for
-			rf.vote_for = -1
-			rf.committed_index = min(rf.current_index, args.Leader_committed_index)
-			DPrintf(colorPurple+"[server id]: %v, [last applied]: %v, [committed index]: %v, [log len]: %v\n"+colorReset, rf.server_id, rf.last_applied, rf.committed_index, len(rf.logs))
-			for i := rf.last_applied; i < rf.committed_index; i++ {
-				rf.last_applied++
-				rf.tester <- ApplyMsg{CommandValid: true, Command: rf.logs[rf.last_applied].Command, CommandIndex: rf.last_applied}
+			rf.setVoteFor(-1)
+			rf.setCommittedIndex(min(rf.getCurrentIndex(), args.Leader_committed_index))
+			for i := rf.getLastApplied(); i < rf.getCommittedIndex(); i++ {
+				rf.addLastApplied()
+				rf.applyLogEntry(rf.getLastApplied())
 			}
-			rf.mu.Unlock()
-			reply.Reply_term = rf.current_term
+
+			reply.Reply_term = rf.getCurrentTerm()
 			reply.Success = true
-			reply.Server_Identifier = Follower
-			reply.Debug_Info = "[server]: follower, log entry is empty, success"
+			reply.Identification = Follower
+			//reply.Debug_Info = "[server]: follower, log entry is empty, success"
+			return
+		}
+
+		// follower don't have log entry in Prev_Log_Index
+		if args.Prev_Log_Index >= rf.getLogLen() {
+			reply.Reply_term = rf.getCurrentTerm()
+			reply.Xterm = -1
+			reply.XIndex = rf.getLogLen()
+			reply.Success = false
+			reply.Identification = Follower
 			return
 		}
 
 		// if the term of log entry pointed by Prev_Log_Index in follower not matchs Prev_Log_Term
-		if len(rf.logs) != 0 && (args.Prev_Log_Index < len(rf.logs) && args.Prev_Log_Index >= 0 && rf.logs[args.Prev_Log_Index].Term != args.Prev_Log_Term) {
-			rf.mu.Unlock()
-			reply.Reply_term = rf.current_term
+		if len(rf.getLogs()) != 0 && rf.AppendEntriesCondition(args) {
+			reply.Reply_term = rf.getCurrentTerm()
 			reply.Success = false
-			reply.Server_Identifier = Follower
-			reply.Debug_Info = fmt.Sprintf("[server]: follower, leader's log entry is not up-to-date, [logs len]: %v, [local prev term]: %v\n", len(rf.logs), rf.logs[args.Prev_Log_Index].Term)
+			XTerm, XIndex := rf.getLogEntry(args.Prev_Log_Index).Term, -1
+			for i := 1; i < rf.getLogLen(); i++ {
+				if log := rf.getLogEntry(i); log.Term == XTerm {
+					XIndex = i
+					break
+				}
+			}
+			reply.Xterm = XTerm
+			reply.XIndex = XIndex
+			reply.Identification = Follower
 			return
 		}
 		// replicate log entries in AppendEntries to follower
@@ -352,67 +631,63 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// if control flow can reach here, it means that log entry pointed by Prev_Log_Index in rf.logs is matched with Prev_Log_Term
 		// the start_index is assigned when inconsistency occurs
 		// Deduplication is needed!!!!!
-		for idx, log := range rf.logs {
-			DPrintf(colorPurple+"[before] [server id]: %v, [idx]: %v, [log]: %v\n"+colorReset, rf.server_id, idx, *log)
-		}
 		start_index := 0
-		for i, j := args.Prev_Log_Index+1, 0; i < len(rf.logs) && j < len(args.Entries); i++ {
-			if rf.logs[i].Term != args.Entries[j].Term || rf.logs[i].Command != args.Entries[j].Command {
+		for i, j := args.Prev_Log_Index+1, 0; i < rf.getLogLen() && j < len(args.Entries); i++ {
+			log := rf.getLogEntry(i)
+			term, command := log.Term, log.Command
+			if term != args.Entries[j].Term || command != args.Entries[j].Command {
 				// delete the following element
-				rf.logs = rf.logs[:i]
-				rf.current_index = len(rf.logs) - 1
+				// rf.logs = rf.logs[:i]
+				logs := rf.getLogs()
+				rf.setLogs(logs[:i])
+				rf.setCurrentIndex(rf.getLogLen() - 1)
 				break
 			} else {
 				start_index++
 			}
 			j++
 		}
-		DPrintf(colorPurple+"[server id]: %v, [start index]: %v\n"+colorReset, rf.server_id, start_index)
 		// append all log entries to rf.logs
 		for i := start_index; i < len(args.Entries); i++ {
-			rf.logs = append(rf.logs, args.Entries[i])
+			// rf.logs = append(rf.logs, args.Entries[i])
+			rf.appendLogEntry(*args.Entries[i])
 		}
-		rf.current_index = len(rf.logs) - 1
-		for idx, log := range rf.logs {
-			DPrintf(colorPurple+"[after] [server id]: %v, [idx]: %v, [log]: %v\n"+colorReset, rf.server_id, idx, *log)
+		rf.setCurrentIndex(rf.getLogLen() - 1)
+		rf.setCurrentTerm(args.Leader_term)
+		rf.setCommittedIndex(min(rf.getCurrentIndex(), args.Leader_committed_index))
+		for i := rf.getLastApplied(); i < rf.getCommittedIndex() && i < rf.getLogLen(); i++ {
+			rf.addLastApplied()
+			rf.applyLogEntry(rf.getLastApplied())
 		}
-		rf.current_term = args.Leader_term
-		rf.committed_index = min(rf.current_index, args.Leader_committed_index)
-		DPrintf(colorPurple+"[server id]: %v, [commit idx]: %v, [last applied]: %v, [log len]: %v, [leader commit idx]: %v\n"+colorReset, rf.server_id, rf.committed_index, rf.last_applied, len(rf.logs), args.Leader_committed_index)
-		for i := rf.last_applied; i < rf.committed_index && i < len(rf.logs); i++ {
-			rf.last_applied++
-			rf.tester <- ApplyMsg{CommandValid: true, Command: rf.logs[rf.last_applied].Command, CommandIndex: rf.last_applied}
-		}
-		rf.leader_election_timestamp = time.Now()
+		rf.resetElectionTimeout()
 
-		rf.mu.Unlock()
-		reply.Reply_term = rf.current_term
+		reply.Reply_term = rf.getCurrentTerm()
 		reply.Success = true
-		reply.Server_Identifier = Follower
-		reply.Debug_Info = fmt.Sprintf("[server]: follower: %v, append success, [current_idx]: %v, [log len]: %v\n", rf.server_id, rf.current_index, len(rf.logs))
+		reply.Identification = Follower
+		//reply.Debug_Info = fmt.Sprintf("[server]: follower: %v, append success, [current_idx]: %v, [log len]: %v\n", rf.server_id, rf.current_index, len(rf.logs))
 	} else if rf.isCandidate() {
-		rf.leader_election_timestamp = time.Now()
-		rf.current_term = args.Leader_term
-		rf.state = Follower
-		rf.vote_for = -1
-		rf.mu.Unlock()
-		reply.Reply_term = rf.current_term
+		rf.resetElectionTimeout()
+		rf.setCurrentTerm(args.Leader_term)
+		rf.setState(Follower)
+		rf.setVoteFor(-1)
+
+		reply.Reply_term = rf.getCurrentTerm()
 		reply.Success = false
-		reply.Server_Identifier = Candidate
-		reply.Debug_Info = fmt.Sprintf("[server]: candidate: %v, fault\n", rf.server_id)
+		reply.Identification = Candidate
+		//reply.Debug_Info = fmt.Sprintf("[server]: candidate: %v, fault\n", rf.server_id)
 	} else {
 		// leader
-		if args.Leader_term >= rf.current_term && args.Leader_committed_index >= rf.committed_index {
-			rf.leader_election_timestamp = time.Now()
-			rf.current_term = args.Leader_term
-			rf.state = Follower
-			rf.vote_for = -1
+		if args.Leader_term >= rf.getCurrentTerm() && args.Leader_committed_index >= rf.getCommittedIndex() {
+			rf.resetElectionTimeout()
+			rf.setCurrentTerm(args.Leader_term)
+			rf.setState(Follower)
+			rf.setVoteFor(-1)
 		}
-		reply.Reply_term = rf.current_term
-		rf.mu.Unlock()
+
+		reply.Reply_term = rf.getCurrentTerm()
 		reply.Success = false
-		reply.Server_Identifier = Leader
-		reply.Debug_Info = fmt.Sprintf("[server]: leader: %v, fault\n", rf.server_id)
+		reply.Identification = Leader
+		//reply.Debug_Info = fmt.Sprintf("[server]: leader: %v, fault\n", rf.server_id)
 	}
 }
 
@@ -503,40 +778,22 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-// auxiliary function
-// leader is 0, candidate is 1, follower is 2
-// use required with lock
-func (rf *Raft) isLeader() bool {
-	z := rf.state
-	return z == Leader
-}
-
-func (rf *Raft) isCandidate() bool {
-	z := rf.state
-	return z == Candidate
-}
-
-func (rf *Raft) isFollower() bool {
-	z := rf.state
-	return z == Follower
-}
-
 func (rf *Raft) heartbeat_message_empty() {
-	rf.mu.Lock()
 	// reset heartbeat timestamp
-	rf.heart_beat_timestamp = time.Now()
-	rf_server_id := rf.server_id
-	rf_current_term := rf.current_term
-	rf_committed_index := rf.committed_index
-	rf.mu.Unlock()
+	rf.resetHeartbeatTimeout()
 	for i := 0; i < rf.cnt; i++ {
 		go func(idx int) {
-			if idx == rf_server_id {
+			if idx == rf.getServerId() {
+				return
+			}
+			if rf.getNextIndex()[idx] > rf.getLogLen() {
 				return
 			}
 			var ae_args AppendEntriesArgs
 			var ae_reply AppendEntriesReply
-			ae_args = AppendEntriesArgs{Leader_term: rf_current_term, Leader_id: rf_server_id, Leader_committed_index: rf_committed_index}
+			ae_args = AppendEntriesArgs{Leader_term: rf.getCurrentTerm(), Leader_id: rf.getServerId(),
+				Prev_Log_Index: rf.getNextIndex()[idx] - 1, Prev_Log_Term: rf.getLogs()[rf.getNextIndex()[idx]-1].Term,
+				Leader_committed_index: rf.getCommittedIndex()}
 			ae_reply = AppendEntriesReply{}
 			ok := rf.sendAppendEntries(idx, &ae_args, &ae_reply)
 			if !ok {
@@ -547,101 +804,96 @@ func (rf *Raft) heartbeat_message_empty() {
 }
 
 func (rf *Raft) heartbeat_message_with_log() {
-	rf.mu.Lock()
-	rf_server_id := rf.server_id
-	rf_current_term := rf.current_term
-	rf_committed_index := rf.committed_index
-	rf_logs := rf.logs
-	rf.mu.Unlock()
 
 	// heartbeat messages
 	// reset heartbeat timeout
-	rf.heart_beat_timestamp = time.Now()
+	rf.resetHeartbeatTimeout()
 
 	// a new log entry appended to leader
 
-	rf.mu.Lock()
 	for i := 0; i < rf.cnt; i++ {
 		go func(idx int) {
-			if idx == rf_server_id {
+			if idx == rf.getServerId() {
 				return
 			}
 			var ae_args AppendEntriesArgs
 			var ae_reply AppendEntriesReply
 			// we can directly use rf_next_index[idx], not even with lock
 			// we should duplicate it and use the copy
-			rf.mu.Lock()
-			nxt_idx := rf.next_index[idx]
-			rf.mu.Unlock()
-			if nxt_idx > len(rf_logs) {
+			// nxt_idx := rf.next_index[idx]
+			nxt_idx := rf.getNextIndex()[idx]
+			if nxt_idx > rf.getLogLen() {
 				return
 			}
 			// fmt.Printf("[leader]: %v, [idx]: %v, [next idx]: %v\n", rf.server_id, idx, rf_next_index[idx])
-			log_entries := rf_logs[nxt_idx:]
+			// log_entries := rf_logs[nxt_idx:]
+			log_entries := rf.getLogs()[nxt_idx:]
 			replicated_len := len(log_entries)
-			ae_args = AppendEntriesArgs{Leader_term: rf_current_term, Leader_id: rf_server_id,
-				Prev_Log_Index: nxt_idx - 1, Prev_Log_Term: rf_logs[nxt_idx-1].Term,
-				Entries: log_entries, Leader_committed_index: rf_committed_index}
+			ae_args = AppendEntriesArgs{Leader_term: rf.getCurrentTerm(), Leader_id: rf.getServerId(),
+				Prev_Log_Index: nxt_idx - 1, Prev_Log_Term: rf.getLogs()[nxt_idx-1].Term,
+				Entries: log_entries, Leader_committed_index: rf.getCommittedIndex()}
 			ae_reply = AppendEntriesReply{}
 			ok := rf.sendAppendEntries(idx, &ae_args, &ae_reply)
 			if !ok {
 				return
 			}
-			rf.mu.Lock()
-			if ae_reply.Reply_term > rf.current_term {
-				rf.state = Follower
-				rf.mu.Unlock()
+			if ae_reply.Reply_term > rf.getCurrentTerm() {
+				rf.setState(Follower)
 				return
 			}
-			DPrintf(colorYellow+"[from]: %v, [to]: %v, [prev_index]: %v, [prev_term]: %v, [entries len]: %v\n"+colorReset, rf.server_id, idx, rf.next_index[idx]-1, rf.logs[rf.next_index[idx]-1].Term, len(log_entries))
-			DPrintf(colorYellow+"[ok]: %v, [success]: %v, [debug]: %v\n"+colorReset, ok, ae_reply.Success, ae_reply.Debug_Info)
-			DPrintf(colorYellow+"[next index]: %v, [match index]: %v\n"+colorReset, rf.next_index, rf.match_index)
-			DPrintf(colorYellow+"[debug]: %v\n"+colorReset, ae_reply.Debug_Info)
-			for idx, log := range rf.logs {
-				DPrintf(colorCyan+"[leader]: %v, [idx]: %v, [log]: %v\n"+colorReset, rf.server_id, idx, log)
-			}
-			if ae_reply.Server_Identifier != Follower {
-				rf.mu.Unlock()
+			if ae_reply.Identification != Follower {
 				return
 			}
 			if !ae_reply.Success {
-				if rf.next_index[idx] > 1 {
-					rf.next_index[idx]--
+				// if rf.getNextIndex()[idx] > 1 {
+				// 	rf.addNextIndex(idx, -1)
+				// }
+				has_xterm := false
+				idx_xterm := -1
+				for i := 1; i < rf.getLogLen(); i++ {
+					log := rf.getLogEntry(i)
+					if ae_reply.Xterm == log.Term {
+						has_xterm = true
+						idx_xterm = i
+					}
+				}
+				if has_xterm {
+					rf.setNextIndex(idx, idx_xterm+1)
+				} else {
+					rf.setNextIndex(idx, ae_reply.XIndex)
 				}
 			} else {
-				rf.next_index[idx] += replicated_len
-				rf.match_index[idx] = rf.next_index[idx] - 1
+				// rf.next_index[idx] += replicated_len
+				// rf.match_index[idx] = rf.next_index[idx] - 1
+				rf.addNextIndex(idx, replicated_len)
+				rf.setMatchIndex(idx, rf.getNextIndex()[idx]-1)
 			}
-			rf.mu.Unlock()
 		}(i)
 	}
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) check_commit() {
-	time.Sleep(time.Millisecond * time.Duration(50))
-	rf.mu.Lock()
-	cnt, try_committed_index := 1, rf.committed_index+1
+	try_committed_index := rf.getCommittedIndex() + 1
+	cnt := 1
 	// try_committed_index must lower than len(rf.logs)
-	if try_committed_index >= len(rf.logs) {
-		rf.mu.Unlock()
+	if try_committed_index >= rf.getLogLen() {
 		return
 	}
-	for _, val := range rf.next_index {
+	nxt_idx := rf.getNextIndex()
+	for _, val := range nxt_idx {
 		if val-1 >= try_committed_index {
 			cnt++
 		}
 	}
-	DPrintf(colorYellow+"[cnt]: %v\n"+colorReset, cnt)
-	if cnt >= (rf.cnt+1)/2 {
-		rf.committed_index++
-		DPrintf(colorYellow+"[leader]: %v, [committed_index]: %v\n"+colorReset, rf.server_id, rf.committed_index)
+	if cnt >= (rf.getCnt()+1)/2 {
+		// rf.committed_index++
+		rf.addCommittedIndex()
 	}
-	for i := rf.last_applied; i < rf.committed_index; i++ {
-		rf.last_applied++
-		rf.tester <- ApplyMsg{CommandValid: true, Command: rf.logs[rf.last_applied].Command, CommandIndex: rf.last_applied}
+	for i := rf.getLastApplied(); i < rf.getCommittedIndex(); i++ {
+		// rf.last_applied++
+		rf.addLastApplied()
+		rf.applyLogEntry(rf.getLastApplied())
 	}
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) ticker() {
@@ -653,80 +905,48 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 
 		// election timeout range from 400ms to 500ms
-		election_timeout := 300 + (rand.Int31() % 200)
+		election_timeout := 200 + (rand.Int31() % 200)
 		heartbeat_timeout := 100
-		rf.mu.Lock()
-		rf_state := rf.state
-		rf.mu.Unlock()
-		if rf_state == Follower {
-			rf.mu.Lock()
-			if rf_state != rf.state {
-				rf.mu.Unlock()
-				continue
-			}
-
-			rf.mu.Unlock()
+		if rf.isFollower() {
 			// when thread sleeps, cannot hold lock!!!
 			time.Sleep(time.Millisecond * time.Duration(election_timeout))
-			rf_election_timestamp := rf.leader_election_timestamp
 			// fmt.Printf(colorBlue+"[follower] [server id]: %v, current follower\n"+colorReset, rf.server_id)
-			rf.mu.Lock()
-			if rf.vote_for == -1 && time.Since(rf_election_timestamp) >= time.Millisecond*time.Duration(election_timeout) {
+			if rf.isVoteFor() && time.Since(rf.getLeaderElectionTimestamp()) >= time.Millisecond*time.Duration(election_timeout) {
 				// initialize a new election
 				rf.state = Candidate
 			}
-			rf.mu.Unlock()
-		} else if rf_state == Candidate {
-			rf.mu.Lock()
-			if rf_state != rf.state {
-				rf.mu.Unlock()
-				continue
-			}
-
-			// fmt.Printf(colorPurple+"[candidate] [server id]: %v become candidate\n"+colorReset, rf.server_id)
+		} else if rf.isCandidate() {
 
 			// initialize a new election, reset property
-			rf.leader_election_timestamp = time.Now()
-			rf.election_rounds++
-			rf.current_term++
-			rf.vote_for = rf.server_id
+			rf.resetElectionTimeout()
+			rf.addElectionRounds()
+			rf.addCurrentTerm()
+			rf.setVoteFor(rf.getServerId())
 
-			// avoid concurrency
-			rf_server_id := rf.server_id
-			rf_current_term := rf.current_term
-			rf_election_rounds := rf.election_rounds
-			rf_last_applied := rf.last_applied
-			rf_logs := rf.logs
-
-			rf.mu.Unlock()
 			votes := 1 // vote for itself
 			request_vote_state := true
 			var lk sync.Mutex
 
-			rf.mu.Lock()
 			for i := 0; i < rf.cnt; i++ {
 				go func(idx int) {
 					if idx == rf.server_id {
 						return
 					}
 					rv_args := RequestVoteArgs{Candidate_term: rf.current_term,
-						Candidate_Id:              rf_server_id,
-						Last_Log_Index:            rf_last_applied,
-						Last_Log_Term:             rf_logs[rf_last_applied].Term,
-						Candidate_Election_Rounds: rf_election_rounds}
+						Candidate_Id:              rf.getServerId(),
+						Last_Log_Index:            rf.getLastApplied(),
+						Last_Log_Term:             rf.getLogs()[rf.getLastApplied()].Term,
+						Candidate_Election_Rounds: rf.getElectionRounds()}
 					rv_reply := RequestVoteReply{}
 					for request_vote_state && !rf.sendRequestVote(idx, &rv_args, &rv_reply) {
 						time.Sleep(time.Millisecond * time.Duration(10))
 					}
 					//DPrintf("[candidate] [server id]: %v, [election_state]: %v, [request id]: %v, [reply_term]: %v, [grant]: %v\n", rf_server_id, request_vote_state, idx, rv_reply.Reply_Term, rv_reply.Vote_Grant)
-					DPrintf(colorCyan+"[Debug]: %v, [server id]: %v, [object id]: %v\n"+colorReset, rv_reply.Debug_Info, rf.server_id, idx)
-					if rv_reply.Reply_Term > rf_current_term {
-						rf.mu.Lock()
-						rf.current_term = rv_reply.Reply_Term
-						rf.state = Follower
-						rf.vote_for = -1
-						rf.leader_election_timestamp = time.Now()
-						rf.mu.Unlock()
+					if rv_reply.Reply_Term > rf.getCurrentTerm() {
+						rf.setCurrentTerm(rv_reply.Reply_Term)
+						rf.setState(Follower)
+						rf.setVoteFor(-1)
+						rf.resetElectionTimeout()
 						return
 					}
 					if rv_reply.Vote_Grant {
@@ -736,51 +956,36 @@ func (rf *Raft) ticker() {
 					}
 				}(i)
 			}
-			rf.mu.Unlock()
 
 			time.Sleep(time.Millisecond * time.Duration(election_timeout))
 			request_vote_state = false
-			rf.mu.Lock()
-			rf_current_state := rf.state
-			rf.mu.Unlock()
-			if rf_current_state == Follower {
+
+			if rf.isFollower() {
 				continue
 			}
 
 			// DPrintf("[candidate] [server id]: %v, [votes]: %v\n", rf_server_id, votes)
 			if votes >= (rf.cnt+1)/2 {
-				rf.mu.Lock()
-				rf.state = Leader
-				rf.mu.Unlock()
+				rf.setState(Leader)
 				// we cannot use gorountine
 				rf.heartbeat_message_with_log()
 			}
 			// if failed to become leader, retain candidate state
-		} else if rf_state == Leader {
-			rf.mu.Lock()
-			if rf_state != rf.state {
-				rf.mu.Unlock()
-				continue
-			}
+		} else if rf.isLeader() {
 
-			// rf_committed_index := rf.committed_index
-			// rf_logs := rf.logs
-			rf_heartbeat_timestamp := rf.heart_beat_timestamp
-			rf.mu.Unlock()
-
-			if time.Since(rf_heartbeat_timestamp) >= time.Millisecond*time.Duration(heartbeat_timeout) {
+			if time.Since(rf.getHeartbeatTimestamp()) >= time.Millisecond*time.Duration(heartbeat_timeout) {
 				// heartbeat messages
 				// reset heartbeat timeout
-				rf.heart_beat_timestamp = time.Now()
+				rf.resetHeartbeatTimeout()
 
 				// a new log entry appended to leader
 				// if rf_committed_index+1 < len(rf_logs) {
-				// 	go rf.heartbeat_message_with_log()
+				// 	rf.heartbeat_message_with_log()
 				// } else {
-				// 	go rf.heartbeat_message_empty()
+				// 	rf.heartbeat_message_empty()
 				// }
-				go rf.heartbeat_message_with_log()
-				go rf.check_commit()
+				rf.heartbeat_message_with_log()
+				rf.check_commit()
 			}
 
 		}
