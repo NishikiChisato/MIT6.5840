@@ -238,7 +238,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.mu.Lock()
 		// DPrintf(colorCyan+"[vote]: %v, [last term]: %v, [current term]: %v, [last index]: %v, [current index]: %v\n", rf.vote_for, args.Last_Log_Term, rf.logs[rf.current_index].Term, args.Last_Log_Index, rf.current_index)
 		// we should use last log term and last log index to compare
-		if rf.vote_for == -1 && (args.Last_Log_Term > rf.logs[rf.current_index].Term || (args.Last_Log_Term == rf.logs[rf.current_index].Term && args.Last_Log_Index >= rf.current_index)) {
+		if rf.vote_for == -1 && (args.Last_Log_Term > rf.logs[rf.last_applied].Term || (args.Last_Log_Term == rf.logs[rf.last_applied].Term && args.Last_Log_Index >= rf.last_applied)) {
 			rf.leader_election_timestamp = time.Now()
 			rf.vote_for = args.Candidate_Id
 			rf.current_term = args.Candidate_term
@@ -306,6 +306,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			return
 		}
 
+		if args.Leader_committed_index < rf.last_applied {
+			rf.mu.Unlock()
+			// we can not reset election_timeout
+			reply.Reply_term = rf.current_term
+			reply.Success = false
+			reply.Server_Identifier = Follower
+			reply.Debug_Info = "[server]: follower, leader inconsistency"
+			return
+		}
+
 		// reset election timeout
 		rf.leader_election_timestamp = time.Now()
 
@@ -314,13 +324,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.current_term = args.Leader_term
 			// reset server's vote_for
 			rf.vote_for = -1
-			if args.Leader_committed_index < rf.last_applied {
-				reply.Reply_term = rf.current_term
-				reply.Success = false
-				reply.Server_Identifier = Follower
-				reply.Debug_Info = "[server]: follower, leader inconsistency"
-				return
-			}
 			rf.committed_index = min(rf.current_index, args.Leader_committed_index)
 			DPrintf(colorPurple+"[server id]: %v, [last applied]: %v, [committed index]: %v, [log len]: %v\n"+colorReset, rf.server_id, rf.last_applied, rf.committed_index, len(rf.logs))
 			for i := rf.last_applied; i < rf.committed_index; i++ {
@@ -465,7 +468,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
-
 	term, isLeader := rf.GetState()
 	if !isLeader {
 		return 0, term, false
@@ -692,8 +694,8 @@ func (rf *Raft) ticker() {
 			// avoid concurrency
 			rf_server_id := rf.server_id
 			rf_current_term := rf.current_term
-			rf_current_index := rf.current_index
 			rf_election_rounds := rf.election_rounds
+			rf_last_applied := rf.last_applied
 			rf_logs := rf.logs
 
 			rf.mu.Unlock()
@@ -709,15 +711,15 @@ func (rf *Raft) ticker() {
 					}
 					rv_args := RequestVoteArgs{Candidate_term: rf.current_term,
 						Candidate_Id:              rf_server_id,
-						Last_Log_Index:            rf_current_index,
-						Last_Log_Term:             rf_logs[rf_current_index].Term,
+						Last_Log_Index:            rf_last_applied,
+						Last_Log_Term:             rf_logs[rf_last_applied].Term,
 						Candidate_Election_Rounds: rf_election_rounds}
 					rv_reply := RequestVoteReply{}
 					for request_vote_state && !rf.sendRequestVote(idx, &rv_args, &rv_reply) {
 						time.Sleep(time.Millisecond * time.Duration(10))
 					}
 					//DPrintf("[candidate] [server id]: %v, [election_state]: %v, [request id]: %v, [reply_term]: %v, [grant]: %v\n", rf_server_id, request_vote_state, idx, rv_reply.Reply_Term, rv_reply.Vote_Grant)
-					DPrintf(colorCyan+"[Debug]: %v\n"+colorReset, rv_reply.Debug_Info)
+					DPrintf(colorCyan+"[Debug]: %v, [server id]: %v, [object id]: %v\n"+colorReset, rv_reply.Debug_Info, rf.server_id, idx)
 					if rv_reply.Reply_Term > rf_current_term {
 						rf.mu.Lock()
 						rf.current_term = rv_reply.Reply_Term
@@ -749,31 +751,9 @@ func (rf *Raft) ticker() {
 			if votes >= (rf.cnt+1)/2 {
 				rf.mu.Lock()
 				rf.state = Leader
-
-				rf_server_id = rf.server_id
-				rf_current_term = rf.current_term
-				rf_committed_index := rf.committed_index
 				rf.mu.Unlock()
-
-				// fmt.Printf("[candidate] [server id]: %v becomes leader\n", rf_server_id)
-				// candidate become leader should send empty AppendEntries RPC immediately
-				for i := 0; i < rf.cnt; i++ {
-					go func(i int) {
-						if i == rf_server_id {
-							return
-						}
-						ae_args := AppendEntriesArgs{Leader_term: rf_current_term, Leader_id: rf_server_id,
-							Prev_Log_Index: rf_current_index, Prev_Log_Term: rf_logs[rf_current_index].Term,
-							Leader_committed_index: rf_committed_index}
-						ae_reply := AppendEntriesReply{}
-						// only send once
-						ok := rf.sendAppendEntries(i, &ae_args, &ae_reply)
-						if !ok {
-							//fmt.Printf("[candidate] candidate send failed: from [server id]: %v to [server id]: %v\n", rf.server_id, i)
-							return
-						}
-					}(i)
-				}
+				// we cannot use gorountine
+				rf.heartbeat_message_with_log()
 			}
 			// if failed to become leader, retain candidate state
 		} else if rf_state == Leader {
