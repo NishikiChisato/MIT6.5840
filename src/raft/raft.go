@@ -501,7 +501,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 			reply.Reply_Term = rf.current_term
 			reply.Vote_Grant = true
-			reply.Debug_Info = "vote success"
+			// reply.Debug_Info = "vote success"
 		} else {
 			rf.setCurrentTerm(args.Candidate_term)
 
@@ -612,8 +612,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// if the term of log entry pointed by Prev_Log_Index in follower not matchs Prev_Log_Term
 		if len(rf.getLogs()) != 0 && rf.AppendEntriesCondition(args) {
-			reply.Reply_term = rf.getCurrentTerm()
-			reply.Success = false
 			XTerm, XIndex := rf.getLogEntry(args.Prev_Log_Index).Term, -1
 			for i := 1; i < rf.getLogLen(); i++ {
 				if log := rf.getLogEntry(i); log.Term == XTerm {
@@ -624,6 +622,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Xterm = XTerm
 			reply.XIndex = XIndex
 			reply.Identification = Follower
+			reply.Reply_term = rf.getCurrentTerm()
+			reply.Success = false
 			return
 		}
 		// replicate log entries in AppendEntries to follower
@@ -896,6 +896,52 @@ func (rf *Raft) check_commit() {
 	}
 }
 
+func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
+	// initialize a new election, reset property
+	rf.resetElectionTimeout()
+	rf.addElectionRounds()
+	rf.addCurrentTerm()
+	rf.setVoteFor(rf.getServerId())
+
+	votes := 1 // vote for itself
+	request_vote_state := true
+	var lk sync.Mutex
+
+	for i := 0; i < rf.cnt; i++ {
+		go func(idx int) {
+			if idx == rf.server_id {
+				return
+			}
+			rv_args := RequestVoteArgs{Candidate_term: rf.current_term,
+				Candidate_Id:              rf.getServerId(),
+				Last_Log_Index:            rf.getLastApplied(),
+				Last_Log_Term:             rf.getLogs()[rf.getLastApplied()].Term,
+				Candidate_Election_Rounds: rf.getElectionRounds()}
+			rv_reply := RequestVoteReply{}
+			for request_vote_state && !rf.sendRequestVote(idx, &rv_args, &rv_reply) {
+				time.Sleep(time.Millisecond * time.Duration(10))
+			}
+			//DPrintf("[candidate] [server id]: %v, [election_state]: %v, [request id]: %v, [reply_term]: %v, [grant]: %v\n", rf_server_id, request_vote_state, idx, rv_reply.Reply_Term, rv_reply.Vote_Grant)
+			if rv_reply.Reply_Term > rf.getCurrentTerm() {
+				rf.setCurrentTerm(rv_reply.Reply_Term)
+				rf.setState(Follower)
+				rf.setVoteFor(-1)
+				rf.resetElectionTimeout()
+				return
+			}
+			if rv_reply.Vote_Grant {
+				lk.Lock()
+				votes++
+				lk.Unlock()
+			}
+		}(i)
+	}
+
+	time.Sleep(time.Millisecond * time.Duration(election_timeout))
+	request_vote_state = false
+	return votes
+}
+
 func (rf *Raft) ticker() {
 	for !rf.killed() {
 		// atomic variable, there is no race condition
@@ -905,7 +951,7 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 
 		// election timeout range from 400ms to 500ms
-		election_timeout := 200 + (rand.Int31() % 200)
+		election_timeout := 200 + (rand.Int31() % 150)
 		heartbeat_timeout := 100
 		if rf.isFollower() {
 			// when thread sleeps, cannot hold lock!!!
@@ -916,49 +962,7 @@ func (rf *Raft) ticker() {
 				rf.state = Candidate
 			}
 		} else if rf.isCandidate() {
-
-			// initialize a new election, reset property
-			rf.resetElectionTimeout()
-			rf.addElectionRounds()
-			rf.addCurrentTerm()
-			rf.setVoteFor(rf.getServerId())
-
-			votes := 1 // vote for itself
-			request_vote_state := true
-			var lk sync.Mutex
-
-			for i := 0; i < rf.cnt; i++ {
-				go func(idx int) {
-					if idx == rf.server_id {
-						return
-					}
-					rv_args := RequestVoteArgs{Candidate_term: rf.current_term,
-						Candidate_Id:              rf.getServerId(),
-						Last_Log_Index:            rf.getLastApplied(),
-						Last_Log_Term:             rf.getLogs()[rf.getLastApplied()].Term,
-						Candidate_Election_Rounds: rf.getElectionRounds()}
-					rv_reply := RequestVoteReply{}
-					for request_vote_state && !rf.sendRequestVote(idx, &rv_args, &rv_reply) {
-						time.Sleep(time.Millisecond * time.Duration(10))
-					}
-					//DPrintf("[candidate] [server id]: %v, [election_state]: %v, [request id]: %v, [reply_term]: %v, [grant]: %v\n", rf_server_id, request_vote_state, idx, rv_reply.Reply_Term, rv_reply.Vote_Grant)
-					if rv_reply.Reply_Term > rf.getCurrentTerm() {
-						rf.setCurrentTerm(rv_reply.Reply_Term)
-						rf.setState(Follower)
-						rf.setVoteFor(-1)
-						rf.resetElectionTimeout()
-						return
-					}
-					if rv_reply.Vote_Grant {
-						lk.Lock()
-						votes++
-						lk.Unlock()
-					}
-				}(i)
-			}
-
-			time.Sleep(time.Millisecond * time.Duration(election_timeout))
-			request_vote_state = false
+			votes := rf.CandidateRequestVotes(int(election_timeout))
 
 			if rf.isFollower() {
 				continue
