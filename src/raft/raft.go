@@ -236,7 +236,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.mu.Unlock()
 		}
 		rf.mu.Lock()
-		if rf.vote_for == -1 && (args.Last_Log_Term > rf.current_term || (args.Last_Log_Term == rf.current_term && args.Last_Log_Index >= rf.current_index)) {
+		// DPrintf(colorCyan+"[vote]: %v, [last term]: %v, [current term]: %v, [last index]: %v, [current index]: %v\n", rf.vote_for, args.Last_Log_Term, rf.logs[rf.current_index].Term, args.Last_Log_Index, rf.current_index)
+		// we should use last log term and last log index to compare
+		if rf.vote_for == -1 && (args.Last_Log_Term > rf.logs[rf.current_index].Term || (args.Last_Log_Term == rf.logs[rf.current_index].Term && args.Last_Log_Index >= rf.current_index)) {
 			rf.leader_election_timestamp = time.Now()
 			rf.vote_for = args.Candidate_Id
 			rf.current_term = args.Candidate_term
@@ -286,8 +288,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Reply_term int  // server's term, used for leader to update its own term(but it will revert to follower if condition satified)
-	Success    bool // indicate success of current RPC(true is success)
+	Reply_term        int         // server's term, used for leader to update its own term(but it will revert to follower if condition satified)
+	Success           bool        // indicate success of current RPC(true is success)
+	Server_Identifier ServerState // the identification of server
+	Debug_Info        string
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -297,64 +301,115 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.mu.Unlock()
 			reply.Reply_term = rf.current_term
 			reply.Success = false
+			reply.Server_Identifier = Follower
+			reply.Debug_Info = "[server]: follower, leader's term is lower than follower's"
 			return
 		}
+
 		// reset election timeout
 		rf.leader_election_timestamp = time.Now()
+
 		if len(args.Entries) == 0 {
 			// update server's term
 			rf.current_term = args.Leader_term
 			// reset server's vote_for
 			rf.vote_for = -1
+			if args.Leader_committed_index < rf.last_applied {
+				reply.Reply_term = rf.current_term
+				reply.Success = false
+				reply.Server_Identifier = Follower
+				reply.Debug_Info = "[server]: follower, leader inconsistency"
+				return
+			}
+			rf.committed_index = min(rf.current_index, args.Leader_committed_index)
+			DPrintf(colorPurple+"[server id]: %v, [last applied]: %v, [committed index]: %v, [log len]: %v\n"+colorReset, rf.server_id, rf.last_applied, rf.committed_index, len(rf.logs))
+			for i := rf.last_applied; i < rf.committed_index; i++ {
+				rf.last_applied++
+				rf.tester <- ApplyMsg{CommandValid: true, Command: rf.logs[rf.last_applied].Command, CommandIndex: rf.last_applied}
+			}
 			rf.mu.Unlock()
 			reply.Reply_term = rf.current_term
 			reply.Success = true
+			reply.Server_Identifier = Follower
+			reply.Debug_Info = "[server]: follower, log entry is empty, success"
 			return
 		}
-		// if args.Prev_Log_Index > rf.current_index || (len(rf.logs) > 0 && args.Prev_Log_Term != rf.logs[args.Prev_Log_Index].Term) {
-		// 	reply.Reply_term = rf.current_term
-		// 	reply.Success = false
-		// 	rf.mu.Unlock()
-		// 	return
-		// }
-		// if rf.logs[args.Prev_Log_Index+1].Term != args.Entries[0].Term || rf.logs[args.Prev_Log_Index+1].Command != args.Entries[0].Command {
-		// 	rf.leader_election_timestamp = time.Now()
-		// 	tmp_log := []*LogType{}
-		// 	for i := 0; i <= args.Prev_Log_Index; i++ {
-		// 		tmp_log = append(tmp_log, rf.logs[i])
-		// 	}
-		// 	rf.logs = tmp_log
-		// }
-		// for i := 1; i < len(args.Entries); i++ {
-		// 	rf.logs = append(rf.logs, args.Entries[i])
-		// }
-		// if args.Leader_committed_index > rf.committed_index {
-		// 	rf.committed_index = min(args.Leader_committed_index, len(rf.logs)-1)
-		// }
-		rf.mu.Unlock()
-		reply.Reply_term = rf.current_term
-		reply.Success = true
-	} else if rf.isCandidate() {
-		if args.Leader_term >= rf.current_term {
-			rf.leader_election_timestamp = time.Now()
-			rf.current_term = args.Leader_term
-			rf.state = Follower
-			rf.vote_for = -1
+
+		// if the term of log entry pointed by Prev_Log_Index in follower not matchs Prev_Log_Term
+		if len(rf.logs) != 0 && (args.Prev_Log_Index < len(rf.logs) && args.Prev_Log_Index >= 0 && rf.logs[args.Prev_Log_Index].Term != args.Prev_Log_Term) {
+			rf.mu.Unlock()
+			reply.Reply_term = rf.current_term
+			reply.Success = false
+			reply.Server_Identifier = Follower
+			reply.Debug_Info = fmt.Sprintf("[server]: follower, leader's log entry is not up-to-date, [logs len]: %v, [local prev term]: %v\n", len(rf.logs), rf.logs[args.Prev_Log_Index].Term)
+			return
 		}
+		// replicate log entries in AppendEntries to follower
+		// if inconsistency occurs, delete the following log entries at that point in follower
+		// if control flow can reach here, it means that log entry pointed by Prev_Log_Index in rf.logs is matched with Prev_Log_Term
+		// the start_index is assigned when inconsistency occurs
+		// Deduplication is needed!!!!!
+		for idx, log := range rf.logs {
+			DPrintf(colorPurple+"[before] [server id]: %v, [idx]: %v, [log]: %v\n"+colorReset, rf.server_id, idx, *log)
+		}
+		start_index := 0
+		for i, j := args.Prev_Log_Index+1, 0; i < len(rf.logs) && j < len(args.Entries); i++ {
+			if rf.logs[i].Term != args.Entries[j].Term || rf.logs[i].Command != args.Entries[j].Command {
+				// delete the following element
+				rf.logs = rf.logs[:i]
+				rf.current_index = len(rf.logs) - 1
+				break
+			} else {
+				start_index++
+			}
+			j++
+		}
+		DPrintf(colorPurple+"[server id]: %v, [start index]: %v\n"+colorReset, rf.server_id, start_index)
+		// append all log entries to rf.logs
+		for i := start_index; i < len(args.Entries); i++ {
+			rf.logs = append(rf.logs, args.Entries[i])
+		}
+		rf.current_index = len(rf.logs) - 1
+		for idx, log := range rf.logs {
+			DPrintf(colorPurple+"[after] [server id]: %v, [idx]: %v, [log]: %v\n"+colorReset, rf.server_id, idx, *log)
+		}
+		rf.current_term = args.Leader_term
+		rf.committed_index = min(rf.current_index, args.Leader_committed_index)
+		DPrintf(colorPurple+"[server id]: %v, [commit idx]: %v, [last applied]: %v, [log len]: %v, [leader commit idx]: %v\n"+colorReset, rf.server_id, rf.committed_index, rf.last_applied, len(rf.logs), args.Leader_committed_index)
+		for i := rf.last_applied; i < rf.committed_index && i < len(rf.logs); i++ {
+			rf.last_applied++
+			rf.tester <- ApplyMsg{CommandValid: true, Command: rf.logs[rf.last_applied].Command, CommandIndex: rf.last_applied}
+		}
+		rf.leader_election_timestamp = time.Now()
+
 		rf.mu.Unlock()
 		reply.Reply_term = rf.current_term
 		reply.Success = true
+		reply.Server_Identifier = Follower
+		reply.Debug_Info = fmt.Sprintf("[server]: follower: %v, append success, [current_idx]: %v, [log len]: %v\n", rf.server_id, rf.current_index, len(rf.logs))
+	} else if rf.isCandidate() {
+		rf.leader_election_timestamp = time.Now()
+		rf.current_term = args.Leader_term
+		rf.state = Follower
+		rf.vote_for = -1
+		rf.mu.Unlock()
+		reply.Reply_term = rf.current_term
+		reply.Success = false
+		reply.Server_Identifier = Candidate
+		reply.Debug_Info = fmt.Sprintf("[server]: candidate: %v, fault\n", rf.server_id)
 	} else {
 		// leader
-		if args.Leader_term >= rf.current_term {
+		if args.Leader_term >= rf.current_term && args.Leader_committed_index >= rf.committed_index {
 			rf.leader_election_timestamp = time.Now()
 			rf.current_term = args.Leader_term
 			rf.state = Follower
 			rf.vote_for = -1
 		}
-		rf.mu.Unlock()
 		reply.Reply_term = rf.current_term
-		reply.Success = true
+		rf.mu.Unlock()
+		reply.Success = false
+		reply.Server_Identifier = Leader
+		reply.Debug_Info = fmt.Sprintf("[server]: leader: %v, fault\n", rf.server_id)
 	}
 }
 
@@ -408,13 +463,23 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
 
 	// Your code here (2B).
 
-	return index, term, isLeader
+	term, isLeader := rf.GetState()
+	if !isLeader {
+		return 0, term, false
+	}
+	// current server is leader
+	log_entry := LogType{Command: command, Term: term}
+	rf.mu.Lock()
+	rf.logs = append(rf.logs, &log_entry)
+	rf.current_index++
+	rf.mu.Unlock()
+
+	DPrintf(colorBlue+"[start] [server id]: %v, [current_idx]: %v, [term]: %v, [is_leader]: %v\n"+colorReset, rf.server_id, rf.current_index, term, isLeader)
+
+	return rf.current_index, term, isLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -454,6 +519,129 @@ func (rf *Raft) isFollower() bool {
 	return z == Follower
 }
 
+func (rf *Raft) heartbeat_message_empty() {
+	rf.mu.Lock()
+	// reset heartbeat timestamp
+	rf.heart_beat_timestamp = time.Now()
+	rf_server_id := rf.server_id
+	rf_current_term := rf.current_term
+	rf_committed_index := rf.committed_index
+	rf.mu.Unlock()
+	for i := 0; i < rf.cnt; i++ {
+		go func(idx int) {
+			if idx == rf_server_id {
+				return
+			}
+			var ae_args AppendEntriesArgs
+			var ae_reply AppendEntriesReply
+			ae_args = AppendEntriesArgs{Leader_term: rf_current_term, Leader_id: rf_server_id, Leader_committed_index: rf_committed_index}
+			ae_reply = AppendEntriesReply{}
+			ok := rf.sendAppendEntries(idx, &ae_args, &ae_reply)
+			if !ok {
+				return
+			}
+		}(i)
+	}
+}
+
+func (rf *Raft) heartbeat_message_with_log() {
+	rf.mu.Lock()
+	rf_server_id := rf.server_id
+	rf_current_term := rf.current_term
+	rf_committed_index := rf.committed_index
+	rf_logs := rf.logs
+	rf.mu.Unlock()
+
+	// heartbeat messages
+	// reset heartbeat timeout
+	rf.heart_beat_timestamp = time.Now()
+
+	// a new log entry appended to leader
+
+	rf.mu.Lock()
+	for i := 0; i < rf.cnt; i++ {
+		go func(idx int) {
+			if idx == rf_server_id {
+				return
+			}
+			var ae_args AppendEntriesArgs
+			var ae_reply AppendEntriesReply
+			// we can directly use rf_next_index[idx], not even with lock
+			// we should duplicate it and use the copy
+			rf.mu.Lock()
+			nxt_idx := rf.next_index[idx]
+			rf.mu.Unlock()
+			if nxt_idx > len(rf_logs) {
+				return
+			}
+			// fmt.Printf("[leader]: %v, [idx]: %v, [next idx]: %v\n", rf.server_id, idx, rf_next_index[idx])
+			log_entries := rf_logs[nxt_idx:]
+			replicated_len := len(log_entries)
+			ae_args = AppendEntriesArgs{Leader_term: rf_current_term, Leader_id: rf_server_id,
+				Prev_Log_Index: nxt_idx - 1, Prev_Log_Term: rf_logs[nxt_idx-1].Term,
+				Entries: log_entries, Leader_committed_index: rf_committed_index}
+			ae_reply = AppendEntriesReply{}
+			ok := rf.sendAppendEntries(idx, &ae_args, &ae_reply)
+			if !ok {
+				return
+			}
+			rf.mu.Lock()
+			if ae_reply.Reply_term > rf.current_term {
+				rf.state = Follower
+				rf.mu.Unlock()
+				return
+			}
+			DPrintf(colorYellow+"[from]: %v, [to]: %v, [prev_index]: %v, [prev_term]: %v, [entries len]: %v\n"+colorReset, rf.server_id, idx, rf.next_index[idx]-1, rf.logs[rf.next_index[idx]-1].Term, len(log_entries))
+			DPrintf(colorYellow+"[ok]: %v, [success]: %v, [debug]: %v\n"+colorReset, ok, ae_reply.Success, ae_reply.Debug_Info)
+			DPrintf(colorYellow+"[next index]: %v, [match index]: %v\n"+colorReset, rf.next_index, rf.match_index)
+			DPrintf(colorYellow+"[debug]: %v\n"+colorReset, ae_reply.Debug_Info)
+			for idx, log := range rf.logs {
+				DPrintf(colorCyan+"[leader]: %v, [idx]: %v, [log]: %v\n"+colorReset, rf.server_id, idx, log)
+			}
+			if ae_reply.Server_Identifier != Follower {
+				rf.mu.Unlock()
+				return
+			}
+			if !ae_reply.Success {
+				if rf.next_index[idx] > 1 {
+					rf.next_index[idx]--
+				}
+			} else {
+				rf.next_index[idx] += replicated_len
+				rf.match_index[idx] = rf.next_index[idx] - 1
+			}
+			rf.mu.Unlock()
+		}(i)
+	}
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) check_commit() {
+	time.Sleep(time.Millisecond * time.Duration(50))
+	rf.mu.Lock()
+	cnt, try_committed_index := 1, rf.committed_index+1
+	// try_committed_index must lower than len(rf.logs)
+	if try_committed_index >= len(rf.logs) {
+		rf.mu.Unlock()
+		return
+	}
+	for _, val := range rf.next_index {
+		if val-1 >= try_committed_index {
+			cnt++
+		}
+	}
+	DPrintf(colorYellow+"[cnt]: %v\n"+colorReset, cnt)
+	if cnt >= (rf.cnt+1)/2 {
+		rf.committed_index++
+		DPrintf(colorYellow+"[leader]: %v, [committed_index]: %v\n"+colorReset, rf.server_id, rf.committed_index)
+	}
+	for i := rf.last_applied; i < rf.committed_index; i++ {
+		rf.last_applied++
+		rf.tester <- ApplyMsg{CommandValid: true, Command: rf.logs[rf.last_applied].Command, CommandIndex: rf.last_applied}
+	}
+	rf.mu.Unlock()
+}
+
 func (rf *Raft) ticker() {
 	for !rf.killed() {
 		// atomic variable, there is no race condition
@@ -464,6 +652,7 @@ func (rf *Raft) ticker() {
 
 		// election timeout range from 400ms to 500ms
 		election_timeout := 300 + (rand.Int31() % 200)
+		heartbeat_timeout := 100
 		rf.mu.Lock()
 		rf_state := rf.state
 		rf.mu.Unlock()
@@ -502,10 +691,10 @@ func (rf *Raft) ticker() {
 
 			// avoid concurrency
 			rf_server_id := rf.server_id
-			rf_current_index := rf.current_index
 			rf_current_term := rf.current_term
+			rf_current_index := rf.current_index
 			rf_election_rounds := rf.election_rounds
-			rf_committed_index := rf.committed_index
+			rf_logs := rf.logs
 
 			rf.mu.Unlock()
 			votes := 1 // vote for itself
@@ -521,18 +710,20 @@ func (rf *Raft) ticker() {
 					rv_args := RequestVoteArgs{Candidate_term: rf.current_term,
 						Candidate_Id:              rf_server_id,
 						Last_Log_Index:            rf_current_index,
-						Last_Log_Term:             rf_current_term,
+						Last_Log_Term:             rf_logs[rf_current_index].Term,
 						Candidate_Election_Rounds: rf_election_rounds}
 					rv_reply := RequestVoteReply{}
 					for request_vote_state && !rf.sendRequestVote(idx, &rv_args, &rv_reply) {
-
+						time.Sleep(time.Millisecond * time.Duration(10))
 					}
-					// fmt.Printf("[candidate] [server id]: %v, [election_state]: %v, [request id]: %v, [reply_term]: %v, [grant]: %v\n", rf_server_id, request_vote_state, idx, rv_reply.Reply_Term, rv_reply.Vote_Grant)
-					// fmt.Printf("[Debug]: %v\n", rv_reply.Debug_Info)
+					//DPrintf("[candidate] [server id]: %v, [election_state]: %v, [request id]: %v, [reply_term]: %v, [grant]: %v\n", rf_server_id, request_vote_state, idx, rv_reply.Reply_Term, rv_reply.Vote_Grant)
+					DPrintf(colorCyan+"[Debug]: %v\n"+colorReset, rv_reply.Debug_Info)
 					if rv_reply.Reply_Term > rf_current_term {
 						rf.mu.Lock()
 						rf.current_term = rv_reply.Reply_Term
 						rf.state = Follower
+						rf.vote_for = -1
+						rf.leader_election_timestamp = time.Now()
 						rf.mu.Unlock()
 						return
 					}
@@ -554,16 +745,14 @@ func (rf *Raft) ticker() {
 				continue
 			}
 
-			// fmt.Printf("[candidate] [server id]: %v, [votes]: %v\n", rf_server_id, votes)
+			// DPrintf("[candidate] [server id]: %v, [votes]: %v\n", rf_server_id, votes)
 			if votes >= (rf.cnt+1)/2 {
 				rf.mu.Lock()
 				rf.state = Leader
 
 				rf_server_id = rf.server_id
-				rf_current_index = rf.current_index
 				rf_current_term = rf.current_term
-				rf_election_rounds = rf.election_rounds
-				rf_committed_index = rf.committed_index
+				rf_committed_index := rf.committed_index
 				rf.mu.Unlock()
 
 				// fmt.Printf("[candidate] [server id]: %v becomes leader\n", rf_server_id)
@@ -573,10 +762,8 @@ func (rf *Raft) ticker() {
 						if i == rf_server_id {
 							return
 						}
-						ae_args := AppendEntriesArgs{Leader_term: rf.current_term,
-							Leader_id:              rf_server_id,
-							Prev_Log_Index:         rf_current_index,
-							Prev_Log_Term:          rf_current_term,
+						ae_args := AppendEntriesArgs{Leader_term: rf_current_term, Leader_id: rf_server_id,
+							Prev_Log_Index: rf_current_index, Prev_Log_Term: rf_logs[rf_current_index].Term,
 							Leader_committed_index: rf_committed_index}
 						ae_reply := AppendEntriesReply{}
 						// only send once
@@ -595,37 +782,27 @@ func (rf *Raft) ticker() {
 				rf.mu.Unlock()
 				continue
 			}
-			// fmt.Printf(colorYellow+"[leader] [server id]: %v, current leader\n"+colorReset, rf.server_id)
 
-			heartbeat_timeout := time.Millisecond * time.Duration(100)
-			rf.mu.Unlock()
+			// rf_committed_index := rf.committed_index
+			// rf_logs := rf.logs
 			rf_heartbeat_timestamp := rf.heart_beat_timestamp
+			rf.mu.Unlock()
 
-			// heartbeat messages
-			if time.Since(rf_heartbeat_timestamp) >= heartbeat_timeout {
+			if time.Since(rf_heartbeat_timestamp) >= time.Millisecond*time.Duration(heartbeat_timeout) {
+				// heartbeat messages
 				// reset heartbeat timeout
 				rf.heart_beat_timestamp = time.Now()
 
-				for i := 0; i < rf.cnt; i++ {
-					go func(idx int) {
-						if idx == rf.server_id {
-							return
-						}
-						ae_args := AppendEntriesArgs{Leader_term: rf.current_term,
-							Leader_id:              rf.server_id,
-							Prev_Log_Index:         rf.current_index,
-							Prev_Log_Term:          rf.current_term,
-							Leader_committed_index: rf.committed_index}
-						ae_reply := AppendEntriesReply{}
-						ok := rf.sendAppendEntries(idx, &ae_args, &ae_reply)
-						// fmt.Printf(colorYellow+"[leader] [server id]: %v, [sendAE]: [to server id]: %v, [ok]: %v, [reply term]: %v, [reply success]: %v\n"+colorReset, rf.server_id, idx, ok, ae_reply.Reply_term, ae_reply.Success)
-						if !ok {
-							//fmt.Printf("[leader] candidate send failed: from [server id]: %v to [object id]: %v\n", rf.server_id, idx)
-							return
-						}
-					}(i)
-				}
+				// a new log entry appended to leader
+				// if rf_committed_index+1 < len(rf_logs) {
+				// 	go rf.heartbeat_message_with_log()
+				// } else {
+				// 	go rf.heartbeat_message_empty()
+				// }
+				go rf.heartbeat_message_with_log()
+				go rf.check_commit()
 			}
+
 		}
 
 		// pause for a random amount of time between 50 and 350
@@ -658,11 +835,20 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.server_id = me
 	rf.vote_for = -1 // -1 means there hasn't vote yet
 	rf.current_term = 0
-	rf.current_index = 0
+	rf.current_index = 0 // there are always one log entry in each server
 	rf.committed_index = 0
 	rf.last_applied = 0
-	rf.logs = append(rf.logs, &LogType{})
 	rf.leader_election_timestamp = time.Now()
+
+	// every server initially has one log entry
+	rf.logs = append(rf.logs, &LogType{Term: 0})
+
+	rf.next_index = make(map[int]int, rf.cnt)
+	rf.match_index = make(map[int]int, rf.cnt)
+	for i := 0; i < rf.cnt; i++ {
+		rf.next_index[i] = 1
+		rf.match_index[i] = 0
+	}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

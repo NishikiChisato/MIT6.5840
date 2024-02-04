@@ -141,6 +141,17 @@ func (cfg *config) crash1(i int) {
 	}
 }
 
+type KV struct {
+	Idx int
+	Val interface{}
+}
+
+type BYKV []KV
+
+func (t BYKV) Len() int           { return len(t) }
+func (t BYKV) Swap(i, j int)      { t[i], t[j] = t[j], t[i] }
+func (t BYKV) Less(i, j int) bool { return t[i].Idx < t[j].Idx }
+
 func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	err_msg := ""
 	v := m.Command
@@ -150,6 +161,17 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
+			// log.Printf(colorRed+"[err]: %v\n"+colorReset, err_msg)
+			// for idx, elem := range cfg.logs {
+			// 	arr := BYKV{}
+			// 	for key, val := range elem {
+			// 		arr = append(arr, KV{Idx: key, Val: val})
+			// 	}
+			// 	sort.Sort(BYKV(arr))
+			// 	for _, val := range arr {
+			// 		fmt.Printf("[server id]: %v, [val]: %v\n", idx, val)
+			// 	}
+			// }
 		}
 	}
 	_, prevok := cfg.logs[i][m.CommandIndex-1]
@@ -577,7 +599,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				}
 			}
 		}
-
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
@@ -594,6 +615,11 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
+				// for idx, elem := range cfg.logs {
+				// 	for key, val := range elem {
+				// 		fmt.Printf("[server id]: %v, [idx]: %v, [val]: %v\n", idx, key, val)
+				// 	}
+				// }
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
@@ -601,6 +627,11 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		}
 	}
 	if cfg.checkFinished() == false {
+		// for idx, elem := range cfg.logs {
+		// 	for key, val := range elem {
+		// 		fmt.Printf("[server id]: %v, [idx]: %v, [val]: %v\n", idx, key, val)
+		// 	}
+		// }
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1

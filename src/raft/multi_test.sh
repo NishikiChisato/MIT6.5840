@@ -5,6 +5,8 @@ if [ $# -ne 2 ]; then
   exit 1
 fi
 
+rm trail_failed_*.log
+
 passed=0
 failed=0
 RED='\033[31m'
@@ -13,15 +15,25 @@ RESET='\033[0m'
 
 for i in $(seq 1 $1); do
   echo -e "${GREEN}Running trail $i out of all $1 trails${RESET}" 
-  go test -run $2 | tee tmp_raft_file.log
-  if [ $? -eq 0 ]; then
+  go test -run $2 > tmp_raft_file.log &
+  GO_TEST_PID=$!
+  tail -f tmp_raft_file.log &
+  TAIL_PID=$!
+
+  wait $GO_TEST_PID
+  GO_EXIT_CODE=$?
+
+  kill $TAIL_PID
+  wait $TAIL_PID 2> /dev/null
+
+  if [ $GO_EXIT_CODE -eq 0 ]; then
     passed=$((passed+1))
     echo -e "${GREEN}Trail $i passed${RESET}"
     rm tmp_raft_file.log
   else
     failed=$((failed+1))
     echo -e "${RED}Trail $i failed${RESET}"
-    mv tmp_raft_file "trail_failed_$1.log"
+    mv tmp_raft_file.log "trail_failed_$i.log"
   fi
 done
 
