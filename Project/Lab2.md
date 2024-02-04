@@ -86,8 +86,31 @@
 
 - 如果当前线程判断其为 `follower`，那么需要 `sleep` 一段时间（`election_timeout`），在 `sleep` 结束后，检查其 `timestamp`，判断是否超时（如果对 `timestamp` 执行复制的话需要在 `sleep` 之后执行复制）
 
+## lab 2B
 
+- `follower` 需要有跳过冗余 `log` 的机制
 
+- 无论 `heartbeat message` 是否存在 `log`，我们都不需要等待其执行完毕；对于有 `log` 的情况，我们在 `go routine` 中对 `matchIndex` 进行更新
+  - 我们周期性地检查 `matchIndex`，更新 `committed_index` 即可
+
+- 假设原先的 `leader` 崩溃了，新的 `leader` 该如何更新 `nextIndex` 和 `matchIndex`
+
+- 本实验中，一个断网的 `server` 会不断 `election timeout`，因此其 `term` 会一直增加
+
+- 因此一个 `server` 重新连接回网络后，其状态会变为 `candidate`，所以若 `candiate` 接受到 `AppendEntries`，需要返回 `false`（`leader` 也同理）
+
+- 对于 `RequestVote`，`candidate` 有可能会保持原有状态，而对于 `AppendEntries`，`candidate` 一定要变回 `follower`
+
+- `leader` 只有判断有大多数 `server` 已经**复制**了该 `log entry` ，这可以提交；对于 `follower` 而言，一旦有新的 `log entry` 到达则对其进行提交
+
+- `committed_index` 和 `last_applied` 的区别：
+  - 前者记录 `leader` 提交的 `index`，后者记录 `follower` 提交的 `index`
+  - 换句话说，对于 `leader` 而言，`last_applied` 没有用；对于 `follower` 而言，`committed_index` 没有用
+
+- 假设一个集群有 `7` 台机器，由于网络故障，导致分为了两组，一组 `3` 个，另一组 `4` 个。这两组分别都会有 `leader`，当网络故障消失时，该如何同步
+  - 以提交 `log` 更多的那个 `leader` 为准
+
+- `concurrent map issue`
 
 
 
