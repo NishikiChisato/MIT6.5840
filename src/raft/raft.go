@@ -873,6 +873,7 @@ func (rf *Raft) heartbeat_message_with_log() {
 }
 
 func (rf *Raft) check_commit() {
+	time.Sleep(time.Millisecond * time.Duration(25))
 	try_committed_index := rf.getCommittedIndex() + 1
 	cnt := 1
 	// try_committed_index must lower than len(rf.logs)
@@ -988,8 +989,8 @@ func (rf *Raft) ticker() {
 				// } else {
 				// 	rf.heartbeat_message_empty()
 				// }
-				rf.heartbeat_message_with_log()
-				rf.check_commit()
+				go rf.heartbeat_message_with_log()
+				go rf.check_commit()
 			}
 
 		}
