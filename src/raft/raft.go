@@ -20,12 +20,14 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -159,6 +161,31 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	buf := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(buf)
+	encoder.Encode(rf.getMe())
+	encoder.Encode(rf.getDead())
+	encoder.Encode(rf.getCnt())
+	encoder.Encode(rf.getServerId())
+	encoder.Encode(rf.getState())
+	encoder.Encode(rf.getCurrentTerm())
+	encoder.Encode(rf.getCurrentIndex())
+	encoder.Encode(rf.getVoteFor())
+	encoder.Encode(rf.getCommittedIndex())
+	encoder.Encode(rf.getLastApplied())
+	encoder.Encode(rf.getElectionRounds())
+	rf.mu.Lock()
+	for i := 0; i < rf.getLogLen(); i++ {
+		encoder.Encode(rf.getLogEntry(i))
+	}
+	rf.mu.Unlock()
+	encoder.Encode(rf.getLeaderElectionTimestamp())
+	encoder.Encode(rf.getHeartbeatTimestamp())
+	encoder.Encode(rf.getNextIndex())
+	encoder.Encode(rf.getMatchIndex())
+
+	raft_state := buf.Bytes()
+	rf.persister.Save(raft_state, nil)
 }
 
 // restore previously persisted state.
@@ -179,6 +206,70 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	buf := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(buf)
+	var content interface{}
+	for i := 0; decoder.Decode(&content) != nil; i++ {
+		switch i {
+		case 0:
+			val := content.(int)
+			rf.setMe(val)
+		case 1:
+			val := content.(int32)
+			rf.setDead(val)
+		case 2:
+			val := content.(int)
+			rf.setCnt(val)
+		case 3:
+			val := content.(int)
+			rf.setServerId(val)
+		case 4:
+			val := content.(ServerState)
+			rf.setState(val)
+		case 5:
+			val := content.(int)
+			rf.setCurrentTerm(val)
+		case 6:
+			val := content.(int)
+			rf.setCurrentIndex(val)
+		case 7:
+			val := content.(int)
+			rf.setVoteFor(val)
+		case 8:
+			val := content.(int)
+			rf.setCommittedIndex(val)
+		case 9:
+			val := content.(int)
+			rf.setLastApplied(val)
+		case 10:
+			val := content.(int)
+			rf.setElectionRounds(val)
+		case 11:
+			val := content.(LogType)
+			rf.appendLogEntry(val)
+			for j := 1; j < rf.getCnt(); j++ {
+				decoder.Decode(&content)
+				val := content.(LogType)
+				rf.appendLogEntry(val)
+			}
+		case 12:
+			val := content.(time.Time)
+			rf.setLeaderElectionTimestamp(val)
+		case 13:
+			val := content.(time.Time)
+			rf.setHeartbeatTimestamp(val)
+		case 14:
+			val := content.(map[int]int)
+			for k, v := range val {
+				rf.setNextIndex(k, v)
+			}
+		case 15:
+			val := content.(map[int]int)
+			for k, v := range val {
+				rf.setMatchIndex(k, v)
+			}
+		}
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -214,11 +305,39 @@ func (rf *Raft) isFollower() bool {
 	return z == Follower
 }
 
+func (rf *Raft) getMe() int {
+	rf.mu.Lock()
+	z := rf.me
+	rf.mu.Unlock()
+	return z
+}
+
+func (rf *Raft) setMe(val int) {
+	rf.mu.Lock()
+	rf.me = val
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) getDead() int32 {
+	z := atomic.LoadInt32(&rf.dead)
+	return z
+}
+
+func (rf *Raft) setDead(val int32) {
+	atomic.StoreInt32(&rf.dead, val)
+}
+
 func (rf *Raft) getCnt() int {
 	rf.mu.Lock()
 	z := rf.cnt
 	rf.mu.Unlock()
 	return z
+}
+
+func (rf *Raft) setCnt(val int) {
+	rf.mu.Lock()
+	rf.cnt = val
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) getServerId() int {
@@ -228,10 +347,23 @@ func (rf *Raft) getServerId() int {
 	return z
 }
 
+func (rf *Raft) setServerId(val int) {
+	rf.mu.Lock()
+	rf.server_id = val
+	rf.mu.Unlock()
+}
+
 func (rf *Raft) setState(new_state ServerState) {
 	rf.mu.Lock()
 	rf.state = new_state
 	rf.mu.Unlock()
+}
+
+func (rf *Raft) getState() ServerState {
+	rf.mu.Lock()
+	z := rf.state
+	rf.mu.Unlock()
+	return z
 }
 
 func (rf *Raft) getCurrentIndex() int {
@@ -354,6 +486,13 @@ func (rf *Raft) setVoteFor(id int) {
 	rf.mu.Unlock()
 }
 
+func (rf *Raft) getVoteFor() int {
+	rf.mu.Lock()
+	z := rf.vote_for
+	rf.mu.Unlock()
+	return z
+}
+
 func (rf *Raft) applyLogEntry(index int) {
 	rf.mu.Lock()
 	rf.tester <- ApplyMsg{CommandValid: true, Command: rf.logs[index].Command, CommandIndex: index}
@@ -445,11 +584,23 @@ func (rf *Raft) getLeaderElectionTimestamp() time.Time {
 	return z
 }
 
+func (rf *Raft) setLeaderElectionTimestamp(val time.Time) {
+	rf.mu.Lock()
+	rf.leader_election_timestamp = val
+	rf.mu.Unlock()
+}
+
 func (rf *Raft) getHeartbeatTimestamp() time.Time {
 	rf.mu.Lock()
 	z := rf.heart_beat_timestamp
 	rf.mu.Unlock()
 	return z
+}
+
+func (rf *Raft) setHeartbeatTimestamp(val time.Time) {
+	rf.mu.Lock()
+	rf.heart_beat_timestamp = val
+	rf.mu.Unlock()
 }
 
 // example RequestVote RPC arguments structure.

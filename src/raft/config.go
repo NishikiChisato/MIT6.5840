@@ -615,11 +615,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				// for idx, elem := range cfg.logs {
-				// 	for key, val := range elem {
-				// 		fmt.Printf("[server id]: %v, [idx]: %v, [val]: %v\n", idx, key, val)
-				// 	}
-				// }
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
@@ -627,11 +622,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		}
 	}
 	if cfg.checkFinished() == false {
-		// for idx, elem := range cfg.logs {
-		// 	for key, val := range elem {
-		// 		fmt.Printf("[server id]: %v, [idx]: %v, [val]: %v\n", idx, key, val)
-		// 	}
-		// }
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1
