@@ -105,7 +105,6 @@ type Raft struct {
 
 	tester chan ApplyMsg
 
-	// atomic variable
 	cnt             int         // number of servers
 	server_id       int         // identifier of server
 	state           ServerState // state of server
@@ -472,6 +471,13 @@ func (rf *Raft) RequestVoteCondition(args *RequestVoteArgs) bool {
 	return z
 }
 
+func (rf *Raft) OutdatedCondition(args *RequestVoteArgs) bool {
+	rf.mu.Lock()
+	z := rf.last_applied < args.Last_Log_Index
+	rf.mu.Unlock()
+	return z
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
@@ -480,6 +486,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.Reply_Term = rf.getCurrentTerm()
 			reply.Vote_Grant = false
 			//reply.Debug_Info = "candidate's term is lower than server's"
+			return
+		}
+		if rf.OutdatedCondition(args) {
+			// candidate own the latest log entries
+			rf.resetElectionTimeout()
+			reply.Reply_Term = rf.getCurrentTerm()
+			reply.Vote_Grant = true
 			return
 		}
 		if args.Candidate_Election_Rounds == rf.getElectionRounds() {
@@ -492,7 +505,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.setElectionRounds(args.Candidate_Election_Rounds)
 			rf.setVoteFor(-1)
 		}
-		// DPrintf(colorCyan+"[vote]: %v, [last term]: %v, [current term]: %v, [last index]: %v, [current index]: %v\n", rf.vote_for, args.Last_Log_Term, rf.logs[rf.current_index].Term, args.Last_Log_Index, rf.current_index)
 		// we should use last log term and last log index to compare
 		if rf.isVoteFor() && rf.RequestVoteCondition(args) {
 			rf.resetElectionTimeout()
@@ -520,6 +532,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//reply.Debug_Info = "server is candidate, not vote"
 	} else if rf.isLeader() {
 		// leader
+		// current leader doesn't own all committed log entries
+		if rf.OutdatedCondition(args) {
+			rf.resetElectionTimeout()
+			rf.setCurrentTerm(args.Candidate_term)
+			rf.setState(Follower)
+			reply.Reply_Term = rf.getCurrentTerm()
+			reply.Vote_Grant = true
+			return
+		}
 		if args.Candidate_term > rf.getCurrentTerm() {
 			rf.resetElectionTimeout()
 			rf.setCurrentTerm(args.Candidate_term)
@@ -544,6 +565,7 @@ type AppendEntriesReply struct {
 	Reply_term     int  // server's term, used for leader to update its own term(but it will revert to follower if condition satified)
 	Success        bool // indicate success of current RPC(true is success)
 	Identification ServerState
+	IsOutdated     bool
 	Xterm          int // for fast recovery
 	XIndex         int
 	Debug_Info     string
@@ -575,6 +597,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Xterm = -1
 			reply.XIndex = rf.getLogLen()
 			reply.Identification = Follower
+			reply.IsOutdated = true
 			//reply.Debug_Info = "[server]: follower, leader inconsistency"
 			return
 		}
@@ -655,10 +678,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.setCurrentIndex(rf.getLogLen() - 1)
 		rf.setCurrentTerm(args.Leader_term)
 		rf.setCommittedIndex(min(rf.getCurrentIndex(), args.Leader_committed_index))
-		for i := rf.getLastApplied(); i < rf.getCommittedIndex() && i < rf.getLogLen(); i++ {
-			rf.addLastApplied()
-			rf.applyLogEntry(rf.getLastApplied())
-		}
+		// for i := rf.getLastApplied(); i < rf.getCommittedIndex() && i < rf.getLogLen(); i++ {
+		// 	rf.addLastApplied()
+		// 	rf.applyLogEntry(rf.getLastApplied())
+		// }
 		rf.resetElectionTimeout()
 
 		reply.Reply_term = rf.getCurrentTerm()
@@ -666,10 +689,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Identification = Follower
 		//reply.Debug_Info = fmt.Sprintf("[server]: follower: %v, append success, [current_idx]: %v, [log len]: %v\n", rf.server_id, rf.current_index, len(rf.logs))
 	} else if rf.isCandidate() {
-		rf.resetElectionTimeout()
-		rf.setCurrentTerm(args.Leader_term)
-		rf.setState(Follower)
-		rf.setVoteFor(-1)
+		if args.Leader_term >= rf.getCurrentTerm() || args.Leader_committed_index >= rf.getCommittedIndex() {
+			rf.resetElectionTimeout()
+			rf.setCurrentTerm(args.Leader_term)
+			rf.setState(Follower)
+			rf.setVoteFor(-1)
+		}
 
 		reply.Reply_term = rf.getCurrentTerm()
 		reply.Success = false
@@ -677,7 +702,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//reply.Debug_Info = fmt.Sprintf("[server]: candidate: %v, fault\n", rf.server_id)
 	} else {
 		// leader
-		if args.Leader_term >= rf.getCurrentTerm() && args.Leader_committed_index >= rf.getCommittedIndex() {
+		if args.Leader_term >= rf.getCurrentTerm() || args.Leader_committed_index >= rf.getCommittedIndex() {
 			rf.resetElectionTimeout()
 			rf.setCurrentTerm(args.Leader_term)
 			rf.setState(Follower)
@@ -754,8 +779,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.current_index++
 	rf.mu.Unlock()
 
-	DPrintf(colorBlue+"[start] [server id]: %v, [current_idx]: %v, [term]: %v, [is_leader]: %v\n"+colorReset, rf.server_id, rf.current_index, term, isLeader)
-
 	return rf.current_index, term, isLeader
 }
 
@@ -793,7 +816,7 @@ func (rf *Raft) heartbeat_message_empty() {
 			var ae_reply AppendEntriesReply
 			ae_args = AppendEntriesArgs{Leader_term: rf.getCurrentTerm(), Leader_id: rf.getServerId(),
 				Prev_Log_Index: rf.getNextIndex()[idx] - 1, Prev_Log_Term: rf.getLogs()[rf.getNextIndex()[idx]-1].Term,
-				Leader_committed_index: rf.getCommittedIndex()}
+				Leader_committed_index: rf.getLastApplied()}
 			ae_reply = AppendEntriesReply{}
 			ok := rf.sendAppendEntries(idx, &ae_args, &ae_reply)
 			if !ok {
@@ -831,13 +854,14 @@ func (rf *Raft) heartbeat_message_with_log() {
 			replicated_len := len(log_entries)
 			ae_args = AppendEntriesArgs{Leader_term: rf.getCurrentTerm(), Leader_id: rf.getServerId(),
 				Prev_Log_Index: nxt_idx - 1, Prev_Log_Term: rf.getLogs()[nxt_idx-1].Term,
-				Entries: log_entries, Leader_committed_index: rf.getCommittedIndex()}
+				Entries: log_entries, Leader_committed_index: rf.getLastApplied()}
 			ae_reply = AppendEntriesReply{}
 			ok := rf.sendAppendEntries(idx, &ae_args, &ae_reply)
 			if !ok {
 				return
 			}
-			if ae_reply.Reply_term > rf.getCurrentTerm() {
+			if ae_reply.Reply_term > rf.getCurrentTerm() || ae_reply.IsOutdated {
+				rf.resetElectionTimeout()
 				rf.setState(Follower)
 				return
 			}
@@ -873,7 +897,6 @@ func (rf *Raft) heartbeat_message_with_log() {
 }
 
 func (rf *Raft) check_commit() {
-	time.Sleep(time.Millisecond * time.Duration(25))
 	try_committed_index := rf.getCommittedIndex() + 1
 	cnt := 1
 	// try_committed_index must lower than len(rf.logs)
@@ -922,7 +945,7 @@ func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 			for request_vote_state && !rf.sendRequestVote(idx, &rv_args, &rv_reply) {
 				time.Sleep(time.Millisecond * time.Duration(10))
 			}
-			//DPrintf("[candidate] [server id]: %v, [election_state]: %v, [request id]: %v, [reply_term]: %v, [grant]: %v\n", rf_server_id, request_vote_state, idx, rv_reply.Reply_Term, rv_reply.Vote_Grant)
+			DPrintf(colorYellow+"[server id]: %v, [request to]: %v, [success]: %v\n"+colorReset, rf.getServerId(), idx, rv_reply.Vote_Grant)
 			if rv_reply.Reply_Term > rf.getCurrentTerm() {
 				rf.setCurrentTerm(rv_reply.Reply_Term)
 				rf.setState(Follower)
@@ -940,10 +963,13 @@ func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 
 	time.Sleep(time.Millisecond * time.Duration(election_timeout))
 	request_vote_state = false
+	DPrintf(colorYellow+"[server id]: %v, [votes]: %v\n"+colorReset, rf.getServerId(), votes)
 	return votes
 }
 
 func (rf *Raft) ticker() {
+	election_timeout := 200 + (rand.Int31() % 150)
+	heartbeat_timeout := 100
 	for !rf.killed() {
 		// atomic variable, there is no race condition
 		//fmt.Printf("[server id]: %v, [state]: %v, [term]: %v, [dead]: %v\n", rf.server_id, rf.state, rf.current_term, rf.dead)
@@ -952,15 +978,13 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 
 		// election timeout range from 400ms to 500ms
-		election_timeout := 200 + (rand.Int31() % 150)
-		heartbeat_timeout := 100
 		if rf.isFollower() {
 			// when thread sleeps, cannot hold lock!!!
 			time.Sleep(time.Millisecond * time.Duration(election_timeout))
 			// fmt.Printf(colorBlue+"[follower] [server id]: %v, current follower\n"+colorReset, rf.server_id)
 			if rf.isVoteFor() && time.Since(rf.getLeaderElectionTimestamp()) >= time.Millisecond*time.Duration(election_timeout) {
 				// initialize a new election
-				rf.state = Candidate
+				rf.setState(Candidate)
 			}
 		} else if rf.isCandidate() {
 			votes := rf.CandidateRequestVotes(int(election_timeout))
@@ -969,8 +993,8 @@ func (rf *Raft) ticker() {
 				continue
 			}
 
-			// DPrintf("[candidate] [server id]: %v, [votes]: %v\n", rf_server_id, votes)
 			if votes >= (rf.cnt+1)/2 {
+				DPrintf(colorRed+"[become leader]: %v\n"+colorReset, rf.getServerId())
 				rf.setState(Leader)
 				// we cannot use gorountine
 				rf.heartbeat_message_with_log()
@@ -989,8 +1013,12 @@ func (rf *Raft) ticker() {
 				// } else {
 				// 	rf.heartbeat_message_empty()
 				// }
-				go rf.heartbeat_message_with_log()
-				go rf.check_commit()
+				rf.heartbeat_message_with_log()
+				// judgement must be made here
+				if !rf.isLeader() {
+					continue
+				}
+				rf.check_commit()
 			}
 
 		}

@@ -503,14 +503,21 @@ func TestBackup2B(t *testing.T) {
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
+
+	TPrintf("[leader 1]: %v, all replicated one log entry\n", leader1)
+
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
+
+	TPrintf("three follower (id: 3, 4, 5) disconnect, send request to rest of two (one is leader) (id: 1, 2)\n")
 
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
+
+	TPrintf("leader 1: (0)[1 - 50], follower 2: (1), follower 3, 4, 5: (1)\n")
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -522,10 +529,15 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
 
+	TPrintf("bring three follower (id: 3, 4, 5) to back(will elected a new leader), disconnect a leader (id: 1) and a follower (id: 2)\n")
+	TPrintf("send request to new leader (id: 3)\n")
+
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
+
+	TPrintf("leader 3: (0)(51 - 100), follower 4, 5: (0)(51 - 100)\n")
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
@@ -535,10 +547,14 @@ func TestBackup2B(t *testing.T) {
 	}
 	cfg.disconnect(other)
 
+	TPrintf("disconnect a follower (id: 4): (0)(51 - 100), send request to leader (id: 3)\n")
+
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
+
+	TPrintf("leader 3: (0)(51 - 100)[101 - 150], follower 5: (0)(51 - 100)\n")
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -546,20 +562,31 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 	}
+
+	TPrintf("disconnect leader 3 and follower 5\n")
+
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
+
+	TPrintf("folower 1: (0)[1 - 50], 2: (1), 4: (0)(51 - 100)\n")
+	TPrintf("follower 4 should be elected as a leader\n")
+	TPrintf("follower 4: %v\n", other)
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
 
+	TPrintf("leader 4: (0)(51 - 100)(151 - 200), follower 1, 2: (0)(51 - 100)(151 - 200)\n")
+
+	TPrintf("here, leader should be retained\n")
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
 	cfg.one(rand.Int(), servers, true)
+	TPrintf("all should: (0)(51 - 100)(151 - 200)(201)\n")
 
 	cfg.end()
 }
