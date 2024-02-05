@@ -6,8 +6,8 @@
 
 - [x] [Lab 1](./Project/Lab1.md)
 - [ ] Lab 2
-  - [ ] Lab 2A
-  - [ ] Lab 2B
+  - [x] Lab 2A
+  - [x] Lab 2B
   - [ ] Lab 2C
   - [ ] Lab 2D
 - [ ] Lab 3
@@ -16,4 +16,8 @@
 - [ ] Lab 4
   - [ ] Lab 4A
   - [ ] Lab 4B
+
+## Illustration
+
+Complete accuracy of code cannot be guaranteed due to the randomness of execution. I have tested 2A over 150 times and 2B over 50 times, and no failed test cases haved occurred. The election timeout should be selected carefully. In my implementation, I opted low initial value but large interval between initial value and final value. 
 
