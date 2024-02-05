@@ -479,11 +479,8 @@ func (rf *Raft) RequestVoteCondition(args *RequestVoteArgs) bool {
 	return z
 }
 
-func (rf *Raft) OutdatedCondition(args *RequestVoteArgs) bool {
-	rf.mu.Lock()
-	z := rf.last_applied < args.Last_Log_Index
-	rf.mu.Unlock()
-	return z
+func (rf *Raft) RequestVoteOutdatedCondition(args *RequestVoteArgs) bool {
+	return rf.getLastApplied() < args.Last_Log_Index
 }
 
 // example RequestVote RPC handler.
@@ -496,9 +493,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			//reply.Debug_Info = "candidate's term is lower than server's"
 			return
 		}
-		if rf.OutdatedCondition(args) {
+		if rf.RequestVoteOutdatedCondition(args) {
 			// candidate own the latest log entries
 			rf.resetElectionTimeout()
+			rf.setVoteFor(args.Candidate_Id)
+			rf.setCurrentTerm(args.Candidate_term)
 			reply.Reply_Term = rf.getCurrentTerm()
 			reply.Vote_Grant = true
 			return
@@ -530,6 +529,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			//reply.Debug_Info = "candidate's log lags behind server's"
 		}
 	} else if rf.isCandidate() {
+		if rf.RequestVoteOutdatedCondition(args) {
+			rf.resetElectionTimeout()
+			rf.setCurrentTerm(args.Candidate_term)
+			rf.setVoteFor(args.Candidate_Id)
+			rf.setState(Follower)
+			reply.Reply_Term = rf.getCurrentTerm()
+			reply.Vote_Grant = true
+			return
+		}
 		if args.Candidate_term > rf.getCurrentTerm() {
 			rf.resetElectionTimeout()
 			rf.setCurrentTerm(args.Candidate_term)
@@ -541,9 +549,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else if rf.isLeader() {
 		// leader
 		// current leader doesn't own all committed log entries
-		if rf.OutdatedCondition(args) {
+		if rf.RequestVoteOutdatedCondition(args) {
 			rf.resetElectionTimeout()
 			rf.setCurrentTerm(args.Candidate_term)
+			rf.setVoteFor(args.Candidate_Id)
 			rf.setState(Follower)
 			reply.Reply_Term = rf.getCurrentTerm()
 			reply.Vote_Grant = true
@@ -586,6 +595,10 @@ func (rf *Raft) AppendEntriesCondition(args *AppendEntriesArgs) bool {
 	return z
 }
 
+func (rf *Raft) AppendEntriesOutdatedCondition(args *AppendEntriesArgs) bool {
+	return args.Leader_committed_index < rf.getLastApplied()
+}
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	if rf.isFollower() {
 		if args.Leader_term < rf.getCurrentTerm() {
@@ -598,7 +611,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			return
 		}
 
-		if args.Leader_committed_index < rf.getLastApplied() {
+		if rf.AppendEntriesOutdatedCondition(args) {
 			// we can not reset election_timeout
 			reply.Reply_term = rf.getCurrentTerm()
 			reply.Success = false
@@ -697,6 +710,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Identification = Follower
 		//reply.Debug_Info = fmt.Sprintf("[server]: follower: %v, append success, [current_idx]: %v, [log len]: %v\n", rf.server_id, rf.current_index, len(rf.logs))
 	} else if rf.isCandidate() {
+		if rf.AppendEntriesOutdatedCondition(args) {
+			reply.Reply_term = rf.getCurrentTerm()
+			reply.Success = false
+			reply.Identification = Candidate
+			reply.IsOutdated = true
+			return
+		}
 		if args.Leader_term >= rf.getCurrentTerm() || args.Leader_committed_index >= rf.getCommittedIndex() {
 			rf.resetElectionTimeout()
 			rf.setCurrentTerm(args.Leader_term)
@@ -710,6 +730,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//reply.Debug_Info = fmt.Sprintf("[server]: candidate: %v, fault\n", rf.server_id)
 	} else {
 		// leader
+		if rf.AppendEntriesOutdatedCondition(args) {
+			reply.Reply_term = rf.getCurrentTerm()
+			reply.Success = false
+			reply.Identification = Candidate
+			reply.IsOutdated = true
+			return
+		}
 		if args.Leader_term >= rf.getCurrentTerm() || args.Leader_committed_index >= rf.getCommittedIndex() {
 			rf.resetElectionTimeout()
 			rf.setCurrentTerm(args.Leader_term)
@@ -876,6 +903,7 @@ func (rf *Raft) heartbeat_message_with_log() {
 			if !ok {
 				return
 			}
+			// if outdated is true, irrespective of server type, current leader should step down
 			if ae_reply.Reply_term > rf.getCurrentTerm() || ae_reply.IsOutdated {
 				rf.resetElectionTimeout()
 				rf.setState(Follower)
@@ -989,7 +1017,7 @@ func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 }
 
 func (rf *Raft) ticker() {
-	election_timeout := 150 + (rand.Int31() % 100)
+	election_timeout := 200 + (rand.Int31() % 400)
 	heartbeat_timeout := 100
 	for !rf.killed() {
 		// atomic variable, there is no race condition

@@ -240,6 +240,8 @@ func TestLeaderFailure2B(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
 
+	TPrintf("[leader 1]: %v\n", leader1)
+
 	// the remaining followers should elect
 	// a new leader.
 	cfg.one(102, servers-1, false)
@@ -249,6 +251,8 @@ func TestLeaderFailure2B(t *testing.T) {
 	// disconnect the new leader.
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
+
+	TPrintf("[leader 2]: %v\n", leader2)
 
 	// submit a command to each server.
 	for i := 0; i < servers; i++ {
@@ -467,6 +471,8 @@ func TestRejoin2B(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
 
+	TPrintf("[leader 1]: %v\n", leader1)
+
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
@@ -478,6 +484,8 @@ func TestRejoin2B(t *testing.T) {
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
+
+	TPrintf("[leader 2]: %v\n", leader2)
 
 	// old leader connected again
 	cfg.connect(leader1)
