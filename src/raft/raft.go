@@ -125,6 +125,7 @@ type Raft struct {
 
 	next_index  map[int]int // used for leader, index of next log entry to send to follower(key is server id, val is index of next lof entry to be send in leader)
 	match_index map[int]int // used for leader, index of log entry which is replicated in that server(key is server id, val is index of log entry in leader)
+	index_latch sync.Mutex
 }
 
 // return currentTerm and whether this server
@@ -361,7 +362,8 @@ func (rf *Raft) applyLogEntry(index int) {
 
 func (rf *Raft) getLogs() []*LogType {
 	rf.mu.Lock()
-	logs := rf.logs
+	logs := make([]*LogType, len(rf.logs))
+	copy(logs, rf.logs)
 	rf.mu.Unlock()
 	return logs
 }
@@ -394,14 +396,20 @@ func (rf *Raft) setLogs(val []*LogType) {
 
 func (rf *Raft) getNextIndex() map[int]int {
 	rf.mu.Lock()
-	z := rf.next_index
+	z := make(map[int]int, len(rf.next_index))
+	for k, v := range rf.next_index {
+		z[k] = v
+	}
 	rf.mu.Unlock()
 	return z
 }
 
 func (rf *Raft) getMatchIndex() map[int]int {
 	rf.mu.Lock()
-	z := rf.match_index
+	z := make(map[int]int, len(rf.match_index))
+	for k, v := range rf.match_index {
+		z[k] = v
+	}
 	rf.mu.Unlock()
 	return z
 }
@@ -482,7 +490,7 @@ func (rf *Raft) OutdatedCondition(args *RequestVoteArgs) bool {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	if rf.isFollower() {
-		if args.Candidate_term < rf.current_term {
+		if args.Candidate_term < rf.getCurrentTerm() {
 			reply.Reply_Term = rf.getCurrentTerm()
 			reply.Vote_Grant = false
 			//reply.Debug_Info = "candidate's term is lower than server's"
@@ -511,7 +519,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.setVoteFor(args.Candidate_Id)
 			rf.setCurrentTerm(args.Candidate_term)
 
-			reply.Reply_Term = rf.current_term
+			reply.Reply_Term = rf.getCurrentTerm()
 			reply.Vote_Grant = true
 			// reply.Debug_Info = "vote success"
 		} else {
@@ -773,13 +781,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return 0, term, false
 	}
 	// current server is leader
+	rf.index_latch.Lock()
 	log_entry := LogType{Command: command, Term: term}
-	rf.mu.Lock()
-	rf.logs = append(rf.logs, &log_entry)
-	rf.current_index++
-	rf.mu.Unlock()
+	rf.appendLogEntry(log_entry)
+	rf.addCurrentIndex()
+	z := rf.getCurrentIndex()
+	rf.index_latch.Unlock()
 
-	return rf.current_index, term, isLeader
+	return z, term, isLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -809,13 +818,17 @@ func (rf *Raft) heartbeat_message_empty() {
 			if idx == rf.getServerId() {
 				return
 			}
-			if rf.getNextIndex()[idx] > rf.getLogLen() {
+			rf.index_latch.Lock()
+			next_index := rf.getNextIndex()
+			logs := rf.getLogs()
+			rf.index_latch.Unlock()
+			if next_index[idx] > rf.getLogLen() {
 				return
 			}
 			var ae_args AppendEntriesArgs
 			var ae_reply AppendEntriesReply
 			ae_args = AppendEntriesArgs{Leader_term: rf.getCurrentTerm(), Leader_id: rf.getServerId(),
-				Prev_Log_Index: rf.getNextIndex()[idx] - 1, Prev_Log_Term: rf.getLogs()[rf.getNextIndex()[idx]-1].Term,
+				Prev_Log_Index: next_index[idx] - 1, Prev_Log_Term: logs[next_index[idx]-1].Term,
 				Leader_committed_index: rf.getLastApplied()}
 			ae_reply = AppendEntriesReply{}
 			ok := rf.sendAppendEntries(idx, &ae_args, &ae_reply)
@@ -831,6 +844,7 @@ func (rf *Raft) heartbeat_message_with_log() {
 	// heartbeat messages
 	// reset heartbeat timeout
 	rf.resetHeartbeatTimeout()
+	rf_logs := rf.getLogs()
 
 	// a new log entry appended to leader
 
@@ -844,13 +858,15 @@ func (rf *Raft) heartbeat_message_with_log() {
 			// we can directly use rf_next_index[idx], not even with lock
 			// we should duplicate it and use the copy
 			// nxt_idx := rf.next_index[idx]
+			rf.index_latch.Lock()
 			nxt_idx := rf.getNextIndex()[idx]
+			rf.index_latch.Unlock()
 			if nxt_idx > rf.getLogLen() {
 				return
 			}
 			// fmt.Printf("[leader]: %v, [idx]: %v, [next idx]: %v\n", rf.server_id, idx, rf_next_index[idx])
 			// log_entries := rf_logs[nxt_idx:]
-			log_entries := rf.getLogs()[nxt_idx:]
+			log_entries := rf_logs[nxt_idx:]
 			replicated_len := len(log_entries)
 			ae_args = AppendEntriesArgs{Leader_term: rf.getCurrentTerm(), Leader_id: rf.getServerId(),
 				Prev_Log_Index: nxt_idx - 1, Prev_Log_Term: rf.getLogs()[nxt_idx-1].Term,
@@ -881,16 +897,20 @@ func (rf *Raft) heartbeat_message_with_log() {
 						idx_xterm = i
 					}
 				}
+				rf.index_latch.Lock()
 				if has_xterm {
 					rf.setNextIndex(idx, idx_xterm+1)
 				} else {
 					rf.setNextIndex(idx, ae_reply.XIndex)
 				}
+				rf.index_latch.Unlock()
 			} else {
 				// rf.next_index[idx] += replicated_len
 				// rf.match_index[idx] = rf.next_index[idx] - 1
+				rf.index_latch.Lock()
 				rf.addNextIndex(idx, replicated_len)
 				rf.setMatchIndex(idx, rf.getNextIndex()[idx]-1)
+				rf.index_latch.Unlock()
 			}
 		}(i)
 	}
@@ -903,12 +923,14 @@ func (rf *Raft) check_commit() {
 	if try_committed_index >= rf.getLogLen() {
 		return
 	}
+	rf.index_latch.Lock()
 	nxt_idx := rf.getNextIndex()
 	for _, val := range nxt_idx {
 		if val-1 >= try_committed_index {
 			cnt++
 		}
 	}
+	rf.index_latch.Unlock()
 	if cnt >= (rf.getCnt()+1)/2 {
 		// rf.committed_index++
 		rf.addCommittedIndex()
@@ -927,8 +949,9 @@ func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 	rf.addCurrentTerm()
 	rf.setVoteFor(rf.getServerId())
 
-	votes := 1 // vote for itself
-	request_vote_state := true
+	votes := int32(1) // vote for itself
+	var request_vote_state atomic.Value
+	request_vote_state.Store(true)
 	var lk sync.Mutex
 
 	for i := 0; i < rf.cnt; i++ {
@@ -936,14 +959,13 @@ func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 			if idx == rf.server_id {
 				return
 			}
-			rv_args := RequestVoteArgs{Candidate_term: rf.current_term,
+			rv_args := RequestVoteArgs{Candidate_term: rf.getCurrentTerm(),
 				Candidate_Id:              rf.getServerId(),
 				Last_Log_Index:            rf.getLastApplied(),
 				Last_Log_Term:             rf.getLogs()[rf.getLastApplied()].Term,
 				Candidate_Election_Rounds: rf.getElectionRounds()}
 			rv_reply := RequestVoteReply{}
-			for request_vote_state && !rf.sendRequestVote(idx, &rv_args, &rv_reply) {
-				time.Sleep(time.Millisecond * time.Duration(10))
+			for request_vote_state.CompareAndSwap(true, true) && !rf.sendRequestVote(idx, &rv_args, &rv_reply) {
 			}
 			DPrintf(colorYellow+"[server id]: %v, [request to]: %v, [success]: %v\n"+colorReset, rf.getServerId(), idx, rv_reply.Vote_Grant)
 			if rv_reply.Reply_Term > rf.getCurrentTerm() {
@@ -955,20 +977,19 @@ func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 			}
 			if rv_reply.Vote_Grant {
 				lk.Lock()
-				votes++
+				atomic.AddInt32(&votes, 1)
 				lk.Unlock()
 			}
 		}(i)
 	}
 
 	time.Sleep(time.Millisecond * time.Duration(election_timeout))
-	request_vote_state = false
-	DPrintf(colorYellow+"[server id]: %v, [votes]: %v\n"+colorReset, rf.getServerId(), votes)
-	return votes
+	request_vote_state.Store(false)
+	return int(atomic.LoadInt32(&votes))
 }
 
 func (rf *Raft) ticker() {
-	election_timeout := 200 + (rand.Int31() % 150)
+	election_timeout := 150 + (rand.Int31() % 100)
 	heartbeat_timeout := 100
 	for !rf.killed() {
 		// atomic variable, there is no race condition

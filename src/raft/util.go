@@ -17,7 +17,7 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-var TDebug bool = false
+var TDebug bool = true
 
 func TPrintf(format string, a ...interface{}) (n int, err error) {
 	log.SetFlags(log.Lmicroseconds)

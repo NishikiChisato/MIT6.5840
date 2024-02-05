@@ -15,7 +15,7 @@ RESET='\033[0m'
 
 for i in $(seq 1 $1); do
   echo -e "${GREEN}Running trail $i out of all $1 trails${RESET}" 
-  go test -run $2 > tmp_raft_file.log &
+  go test -run $2 -race > tmp_raft_file.log &
   GO_TEST_PID=$!
   tail -f tmp_raft_file.log &
   TAIL_PID=$!
