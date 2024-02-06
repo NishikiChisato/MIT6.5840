@@ -21,6 +21,7 @@ import (
 	//	"bytes"
 
 	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -76,6 +77,16 @@ type LogType struct {
 	Term    int
 }
 
+type PersistType struct {
+	Current_Term    int
+	Current_Index   int
+	Vote_For        int
+	Logs            []LogType
+	Committed_Index int
+	Last_Applied    int
+	Election_Rounds int
+}
+
 func min(x, y int) int {
 	if x < y {
 		return x
@@ -107,15 +118,15 @@ type Raft struct {
 
 	tester chan ApplyMsg
 
-	cnt             int         // number of servers
-	server_id       int         // identifier of server
-	state           ServerState // state of server
-	current_term    int         // server's current term, in each RPC, it should be updated
-	current_index   int         // index of latest log entry
-	vote_for        int         // server id of this follower vote for
-	committed_index int         // index of last committed log entry
-	last_applied    int         // index of last applied to state machine
-	election_rounds int         // the rounds of elcetion, used by follower to distinct different election, ensuring each election only vote once
+	cnt             atomic.Value // number of servers
+	server_id       atomic.Value // identifier of server
+	state           ServerState  // state of server
+	current_term    atomic.Value // server's current term, in each RPC, it should be updated
+	current_index   atomic.Value // index of latest log entry
+	vote_for        atomic.Value // server id of this follower vote for
+	committed_index atomic.Value // index of last committed log entry
+	last_applied    atomic.Value // index of last applied to state machine
+	election_rounds atomic.Value
 
 	logs []*LogType // store log, first index is 1
 
@@ -139,10 +150,10 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	// return term, isleader
 	rf.mu.Lock()
-	x := rf.current_term
+	x := rf.current_term.Load()
 	y := rf.state
 	rf.mu.Unlock()
-	return x, y == Leader
+	return x.(int), y == Leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -161,29 +172,20 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+
 	buf := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(buf)
-	encoder.Encode(rf.getMe())
-	encoder.Encode(rf.getDead())
-	encoder.Encode(rf.getCnt())
-	encoder.Encode(rf.getServerId())
-	encoder.Encode(rf.getState())
-	encoder.Encode(rf.getCurrentTerm())
-	encoder.Encode(rf.getCurrentIndex())
-	encoder.Encode(rf.getVoteFor())
-	encoder.Encode(rf.getCommittedIndex())
-	encoder.Encode(rf.getLastApplied())
-	encoder.Encode(rf.getElectionRounds())
-	rf.mu.Lock()
-	for i := 0; i < rf.getLogLen(); i++ {
-		encoder.Encode(rf.getLogEntry(i))
+	var rf_persist PersistType
+	rf_persist.Current_Index = rf.getCurrentIndex()
+	rf_persist.Current_Term = rf.getCurrentTerm()
+	rf_persist.Vote_For = rf.getVoteFor()
+	rf_persist.Committed_Index = rf.getCommittedIndex()
+	rf_persist.Last_Applied = rf.getLastApplied()
+	rf_persist.Election_Rounds = rf.getElectionRounds()
+	for i := 1; i < rf.getLogLen(); i++ {
+		rf_persist.Logs = append(rf_persist.Logs, rf.getLogEntry(i))
 	}
-	rf.mu.Unlock()
-	encoder.Encode(rf.getLeaderElectionTimestamp())
-	encoder.Encode(rf.getHeartbeatTimestamp())
-	encoder.Encode(rf.getNextIndex())
-	encoder.Encode(rf.getMatchIndex())
-
+	encoder.Encode(&rf_persist)
 	raft_state := buf.Bytes()
 	rf.persister.Save(raft_state, nil)
 }
@@ -207,67 +209,18 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.yyy = yyy
 	// }
 	buf := bytes.NewBuffer(data)
+	//fmt.Printf("[readpersist] [server]: %v, [buf]: %v\n", rf.getServerId(), buf.Bytes())
 	decoder := labgob.NewDecoder(buf)
-	var content interface{}
-	for i := 0; decoder.Decode(&content) != nil; i++ {
-		switch i {
-		case 0:
-			val := content.(int)
-			rf.setMe(val)
-		case 1:
-			val := content.(int32)
-			rf.setDead(val)
-		case 2:
-			val := content.(int)
-			rf.setCnt(val)
-		case 3:
-			val := content.(int)
-			rf.setServerId(val)
-		case 4:
-			val := content.(ServerState)
-			rf.setState(val)
-		case 5:
-			val := content.(int)
-			rf.setCurrentTerm(val)
-		case 6:
-			val := content.(int)
-			rf.setCurrentIndex(val)
-		case 7:
-			val := content.(int)
-			rf.setVoteFor(val)
-		case 8:
-			val := content.(int)
-			rf.setCommittedIndex(val)
-		case 9:
-			val := content.(int)
-			rf.setLastApplied(val)
-		case 10:
-			val := content.(int)
-			rf.setElectionRounds(val)
-		case 11:
-			val := content.(LogType)
-			rf.appendLogEntry(val)
-			for j := 1; j < rf.getCnt(); j++ {
-				decoder.Decode(&content)
-				val := content.(LogType)
-				rf.appendLogEntry(val)
-			}
-		case 12:
-			val := content.(time.Time)
-			rf.setLeaderElectionTimestamp(val)
-		case 13:
-			val := content.(time.Time)
-			rf.setHeartbeatTimestamp(val)
-		case 14:
-			val := content.(map[int]int)
-			for k, v := range val {
-				rf.setNextIndex(k, v)
-			}
-		case 15:
-			val := content.(map[int]int)
-			for k, v := range val {
-				rf.setMatchIndex(k, v)
-			}
+	var content PersistType
+	if decoder.Decode(&content) == nil {
+		rf.setCurrentIndex(content.Current_Index)
+		rf.setCurrentTerm(content.Current_Term)
+		rf.setVoteFor(content.Vote_For)
+		rf.setCommittedIndex(content.Committed_Index)
+		rf.setLastApplied(content.Last_Applied)
+		rf.setElectionRounds(content.Election_Rounds)
+		for _, log := range content.Logs {
+			rf.appendLogEntry(log)
 		}
 	}
 }
@@ -282,8 +235,26 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
 
 // auxiliary function
+
+func (rf *Raft) String() string {
+	var res string
+	res += fmt.Sprintf("[id]: %v, [cnt]: %v, [state]: %v\n", rf.getServerId(), rf.getCnt(), rf.getState())
+	res += fmt.Sprintf("[current]: [term]: %v, [idx]: %v\n", rf.getCurrentTerm(), rf.getCurrentIndex())
+	res += fmt.Sprintf("[committed_index]: %v, [last_applied]: %v\n", rf.getCommittedIndex(), rf.getLastApplied())
+	res += fmt.Sprintf("[vote for]: %v, [election rounds]: %v\n", rf.getVoteFor(), rf.getElectionRounds())
+	logs := rf.getLogs()
+	for i, v := range logs {
+		res += fmt.Sprintf(colorCyan+"[log]: [idx]: %v, [val]: %v\n"+colorReset, i, v)
+	}
+	return res
+}
+
+func (rf *Raft) getPersist() Persister {
+	z := rf.persister
+	return *z
+}
+
 // leader is 0, candidate is 1, follower is 2
-// use required with lock
 func (rf *Raft) isLeader() bool {
 	rf.mu.Lock()
 	z := rf.state
@@ -316,6 +287,7 @@ func (rf *Raft) setMe(val int) {
 	rf.mu.Lock()
 	rf.me = val
 	rf.mu.Unlock()
+	rf.persist()
 }
 
 func (rf *Raft) getDead() int32 {
@@ -325,32 +297,27 @@ func (rf *Raft) getDead() int32 {
 
 func (rf *Raft) setDead(val int32) {
 	atomic.StoreInt32(&rf.dead, val)
+	rf.persist()
 }
 
 func (rf *Raft) getCnt() int {
-	rf.mu.Lock()
-	z := rf.cnt
-	rf.mu.Unlock()
-	return z
+	z := rf.cnt.Load()
+	return z.(int)
 }
 
 func (rf *Raft) setCnt(val int) {
-	rf.mu.Lock()
-	rf.cnt = val
-	rf.mu.Unlock()
+	rf.cnt.Store(val)
+	rf.persist()
 }
 
 func (rf *Raft) getServerId() int {
-	rf.mu.Lock()
-	z := rf.server_id
-	rf.mu.Unlock()
-	return z
+	z := rf.server_id.Load()
+	return z.(int)
 }
 
 func (rf *Raft) setServerId(val int) {
-	rf.mu.Lock()
-	rf.server_id = val
-	rf.mu.Unlock()
+	rf.server_id.Store(val)
+	rf.persist()
 }
 
 func (rf *Raft) setState(new_state ServerState) {
@@ -367,98 +334,83 @@ func (rf *Raft) getState() ServerState {
 }
 
 func (rf *Raft) getCurrentIndex() int {
-	rf.mu.Lock()
-	z := rf.current_index
-	rf.mu.Unlock()
-	return z
+	z := rf.current_index.Load()
+	return z.(int)
 }
 
 func (rf *Raft) setCurrentIndex(idx int) {
-	rf.mu.Lock()
-	rf.current_index = idx
-	rf.mu.Unlock()
+	rf.current_index.Store(idx)
+	rf.persist()
 }
 
 func (rf *Raft) addCurrentIndex() {
-	rf.mu.Lock()
-	rf.current_index++
-	rf.mu.Unlock()
+	z := rf.current_index.Load()
+	rf.current_index.Store(z.(int) + 1)
+	rf.persist()
 }
 
 func (rf *Raft) getCurrentTerm() int {
-	rf.mu.Lock()
-	z := rf.current_term
-	rf.mu.Unlock()
-	return z
+	z := rf.current_term.Load()
+	return z.(int)
 }
 
 func (rf *Raft) setCurrentTerm(term int) {
-	rf.mu.Lock()
-	rf.current_term = term
-	rf.mu.Unlock()
+	rf.current_term.Store(term)
+	rf.persist()
 }
 
 func (rf *Raft) addCurrentTerm() {
-	rf.mu.Lock()
-	rf.current_term++
-	rf.mu.Unlock()
+	z := rf.current_term.Load()
+	rf.current_term.Store(z.(int) + 1)
+	rf.persist()
 }
 
 func (rf *Raft) getCommittedIndex() int {
-	rf.mu.Lock()
-	z := rf.committed_index
-	rf.mu.Unlock()
-	return z
+	z := rf.committed_index.Load()
+	return z.(int)
 }
 
 func (rf *Raft) setCommittedIndex(idx int) {
-	rf.mu.Lock()
-	rf.committed_index = idx
-	rf.mu.Unlock()
+	rf.committed_index.Store(idx)
+	rf.persist()
 }
 
 func (rf *Raft) addCommittedIndex() {
-	rf.mu.Lock()
-	rf.committed_index++
-	rf.mu.Unlock()
+	z := rf.committed_index.Load()
+	rf.committed_index.Store(z.(int) + 1)
+	rf.persist()
 }
 
 func (rf *Raft) getLastApplied() int {
-	rf.mu.Lock()
-	z := rf.last_applied
-	rf.mu.Unlock()
-	return z
+	z := rf.last_applied.Load()
+	return z.(int)
 }
 
 func (rf *Raft) setLastApplied(idx int) {
-	rf.mu.Lock()
-	rf.last_applied = idx
-	rf.mu.Unlock()
+	rf.last_applied.Store(idx)
+	rf.persist()
 }
 
 func (rf *Raft) addLastApplied() {
-	rf.mu.Lock()
-	rf.last_applied++
-	rf.mu.Unlock()
+	z := rf.last_applied.Load()
+	rf.last_applied.Store(z.(int) + 1)
+	rf.persist()
 }
 
 func (rf *Raft) getElectionRounds() int {
-	rf.mu.Lock()
-	z := rf.election_rounds
-	rf.mu.Unlock()
-	return z
+	z := rf.election_rounds.Load()
+	return z.(int)
 }
 
 func (rf *Raft) addElectionRounds() {
-	rf.mu.Lock()
-	rf.election_rounds++
-	rf.mu.Unlock()
+	z := rf.election_rounds.Load()
+	rf.election_rounds.Store(z.(int) + 1)
+	rf.persist()
 }
 
 func (rf *Raft) setElectionRounds(val int) {
-	rf.mu.Lock()
-	rf.election_rounds = val
-	rf.mu.Unlock()
+	rf.election_rounds.Store(val)
+	rf.persist()
 }
 
 func (rf *Raft) resetElectionTimeout() {
@@ -474,23 +426,18 @@ func (rf *Raft) resetHeartbeatTimeout() {
 }
 
 func (rf *Raft) isVoteFor() bool {
-	rf.mu.Lock()
-	z := rf.vote_for
-	rf.mu.Unlock()
-	return z == -1
+	z := rf.vote_for.Load()
+	return z.(int) == -1
 }
 
 func (rf *Raft) setVoteFor(id int) {
-	rf.mu.Lock()
-	rf.vote_for = id
-	rf.mu.Unlock()
+	rf.vote_for.Store(id)
+	rf.persist()
 }
 
 func (rf *Raft) getVoteFor() int {
-	rf.mu.Lock()
-	z := rf.vote_for
-	rf.mu.Unlock()
-	return z
+	z := rf.vote_for.Load()
+	return z.(int)
 }
 
 func (rf *Raft) applyLogEntry(index int) {
@@ -525,12 +472,14 @@ func (rf *Raft) appendLogEntry(val LogType) {
 	rf.mu.Lock()
 	rf.logs = append(rf.logs, &val)
 	rf.mu.Unlock()
+	rf.persist()
 }
 
 func (rf *Raft) setLogs(val []*LogType) {
 	rf.mu.Lock()
 	rf.logs = val
 	rf.mu.Unlock()
+	rf.persist()
 }
 
 func (rf *Raft) getNextIndex() map[int]int {
@@ -625,7 +574,7 @@ type RequestVoteReply struct {
 
 func (rf *Raft) RequestVoteCondition(args *RequestVoteArgs) bool {
 	rf.mu.Lock()
-	z := args.Last_Log_Term > rf.logs[rf.last_applied].Term || (args.Last_Log_Term == rf.logs[rf.last_applied].Term && args.Last_Log_Index >= rf.last_applied)
+	z := args.Last_Log_Term > rf.logs[rf.last_applied.Load().(int)].Term || (args.Last_Log_Term == rf.logs[rf.last_applied.Load().(int)].Term && args.Last_Log_Index >= rf.last_applied.Load().(int))
 	rf.mu.Unlock()
 	return z
 }
@@ -850,10 +799,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.setCurrentIndex(rf.getLogLen() - 1)
 		rf.setCurrentTerm(args.Leader_term)
 		rf.setCommittedIndex(min(rf.getCurrentIndex(), args.Leader_committed_index))
-		// for i := rf.getLastApplied(); i < rf.getCommittedIndex() && i < rf.getLogLen(); i++ {
-		// 	rf.addLastApplied()
-		// 	rf.applyLogEntry(rf.getLastApplied())
-		// }
 		rf.resetElectionTimeout()
 
 		reply.Reply_term = rf.getCurrentTerm()
@@ -991,7 +936,7 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) heartbeat_message_empty() {
 	// reset heartbeat timestamp
 	rf.resetHeartbeatTimeout()
-	for i := 0; i < rf.cnt; i++ {
+	for i := 0; i < rf.getCnt(); i++ {
 		go func(idx int) {
 			if idx == rf.getServerId() {
 				return
@@ -1026,7 +971,7 @@ func (rf *Raft) heartbeat_message_with_log() {
 
 	// a new log entry appended to leader
 
-	for i := 0; i < rf.cnt; i++ {
+	for i := 0; i < rf.getCnt(); i++ {
 		go func(idx int) {
 			if idx == rf.getServerId() {
 				return
@@ -1133,9 +1078,9 @@ func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 	request_vote_state.Store(true)
 	var lk sync.Mutex
 
-	for i := 0; i < rf.cnt; i++ {
+	for i := 0; i < rf.getCnt(); i++ {
 		go func(idx int) {
-			if idx == rf.server_id {
+			if idx == rf.getServerId() {
 				return
 			}
 			rv_args := RequestVoteArgs{Candidate_term: rf.getCurrentTerm(),
@@ -1146,7 +1091,6 @@ func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 			rv_reply := RequestVoteReply{}
 			for request_vote_state.CompareAndSwap(true, true) && !rf.sendRequestVote(idx, &rv_args, &rv_reply) {
 			}
-			DPrintf(colorYellow+"[server id]: %v, [request to]: %v, [success]: %v\n"+colorReset, rf.getServerId(), idx, rv_reply.Vote_Grant)
 			if rv_reply.Reply_Term > rf.getCurrentTerm() {
 				rf.setCurrentTerm(rv_reply.Reply_Term)
 				rf.setState(Follower)
@@ -1168,7 +1112,7 @@ func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 }
 
 func (rf *Raft) ticker() {
-	election_timeout := 200 + (rand.Int31() % 400)
+	election_timeout := 300 + (rand.Int31() % 400)
 	heartbeat_timeout := 100
 	for !rf.killed() {
 		// atomic variable, there is no race condition
@@ -1193,7 +1137,7 @@ func (rf *Raft) ticker() {
 				continue
 			}
 
-			if votes >= (rf.cnt+1)/2 {
+			if votes >= (rf.getCnt()+1)/2 {
 				DPrintf(colorRed+"[become leader]: %v\n"+colorReset, rf.getServerId())
 				rf.setState(Leader)
 				// we cannot use gorountine
@@ -1248,22 +1192,23 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// Your initialization code here (2A, 2B, 2C).
 
 	rf.tester = applyCh
-	rf.cnt = len(peers)
+	rf.cnt.Store(len(peers))
 	rf.state = Follower
-	rf.server_id = me
-	rf.vote_for = -1 // -1 means there hasn't vote yet
-	rf.current_term = 0
-	rf.current_index = 0 // there are always one log entry in each server
-	rf.committed_index = 0
-	rf.last_applied = 0
+	rf.server_id.Store(me)
+	rf.vote_for.Store(-1) // -1 means there hasn't vote yet
+	rf.current_term.Store(0)
+	rf.current_index.Store(0) // there are always one log entry in each server
+	rf.committed_index.Store(0)
+	rf.last_applied.Store(0)
+	rf.election_rounds.Store(0)
 	rf.leader_election_timestamp = time.Now()
 
 	// every server initially has one log entry
 	rf.logs = append(rf.logs, &LogType{Term: 0})
 
-	rf.next_index = make(map[int]int, rf.cnt)
-	rf.match_index = make(map[int]int, rf.cnt)
-	for i := 0; i < rf.cnt; i++ {
+	rf.next_index = make(map[int]int, rf.getCnt())
+	rf.match_index = make(map[int]int, rf.getCnt())
+	for i := 0; i < rf.getCnt(); i++ {
 		rf.next_index[i] = 1
 		rf.match_index[i] = 0
 	}

@@ -718,6 +718,9 @@ func TestPersist12C(t *testing.T) {
 
 	cfg.one(11, servers, true)
 
+	TPrintf("[11]\n")
+
+	TRaftPrintAllLogs(cfg)
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
 		cfg.start1(i, cfg.applier)
@@ -726,8 +729,12 @@ func TestPersist12C(t *testing.T) {
 		cfg.disconnect(i)
 		cfg.connect(i)
 	}
+	TPrintf(colorRed + "[after clush]\n" + colorReset)
+	TRaftPrintAllLogs(cfg)
 
 	cfg.one(12, servers, true)
+
+	TPrintf("[12]\n")
 
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
@@ -736,11 +743,15 @@ func TestPersist12C(t *testing.T) {
 
 	cfg.one(13, servers, true)
 
+	TPrintf("[13]\n")
+
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
 	cfg.one(14, servers-1, true)
 	cfg.start1(leader2, cfg.applier)
 	cfg.connect(leader2)
+
+	TPrintf("[14]\n")
 
 	cfg.wait(4, servers, -1) // wait for leader2 to join before killing i3
 
@@ -750,7 +761,11 @@ func TestPersist12C(t *testing.T) {
 	cfg.start1(i3, cfg.applier)
 	cfg.connect(i3)
 
+	TPrintf("[15]\n")
+
 	cfg.one(16, servers, true)
+
+	TPrintf("[16]\n")
 
 	cfg.end()
 }
@@ -769,8 +784,12 @@ func TestPersist22C(t *testing.T) {
 
 		leader1 := cfg.checkOneLeader()
 
+		TPrintf("[leader 1]: %v\n", leader1)
+
 		cfg.disconnect((leader1 + 1) % servers)
 		cfg.disconnect((leader1 + 2) % servers)
+
+		TPrintf("disconnect follower 2, 3\n")
 
 		cfg.one(10+index, servers-2, true)
 		index++
@@ -779,21 +798,34 @@ func TestPersist22C(t *testing.T) {
 		cfg.disconnect((leader1 + 3) % servers)
 		cfg.disconnect((leader1 + 4) % servers)
 
+		TPrintf("disconnect leader 1, follower 4, 5\n")
+
 		cfg.start1((leader1+1)%servers, cfg.applier)
 		cfg.start1((leader1+2)%servers, cfg.applier)
+
+		TPrintf("restart two followers (id: 2, 3)\n")
+
 		cfg.connect((leader1 + 1) % servers)
 		cfg.connect((leader1 + 2) % servers)
+
+		TPrintf("connect two followers (id: 2, 3)\n")
 
 		time.Sleep(RaftElectionTimeout)
 
 		cfg.start1((leader1+3)%servers, cfg.applier)
+
+		TPrintf("restart another follower (id: 4)\n")
+
 		cfg.connect((leader1 + 3) % servers)
+
+		TPrintf("connect follower (id: 4)\n")
 
 		cfg.one(10+index, servers-2, true)
 		index++
 
 		cfg.connect((leader1 + 4) % servers)
 		cfg.connect((leader1 + 0) % servers)
+
 	}
 
 	cfg.one(1000, servers, true)
@@ -810,21 +842,47 @@ func TestPersist32C(t *testing.T) {
 
 	cfg.one(101, 3, true)
 
+	TPrintf("first request\n")
+	TRaftPrintAllLogs(cfg)
 	leader := cfg.checkOneLeader()
+
+	TPrintf("[leader 1]: %v\n", leader)
+	TPrintf("disconnect a folower (id: 3)\n")
+
 	cfg.disconnect((leader + 2) % servers)
 
 	cfg.one(102, 2, true)
+	TPrintf("second request\n")
+	TRaftPrintAllLogs(cfg)
 
 	cfg.crash1((leader + 0) % servers)
 	cfg.crash1((leader + 1) % servers)
+
+	TPrintf("crush leader 1 and follower 2\n")
+
 	cfg.connect((leader + 2) % servers)
+
+	TPrintf("connect follower 3\n")
+	TRaftPrintAllLogs(cfg)
+
 	cfg.start1((leader+0)%servers, cfg.applier)
 	cfg.connect((leader + 0) % servers)
 
+	TPrintf("restart leader 1\n")
+	TPrintf("connect leader 1\n")
+	TRaftPrintAllLogs(cfg)
+
 	cfg.one(103, 2, true)
+	TPrintf("third request\n")
+	TRaftPrintAllLogs(cfg)
 
 	cfg.start1((leader+1)%servers, cfg.applier)
+
+	TPrintf("restart follower 2\n")
+
 	cfg.connect((leader + 1) % servers)
+
+	TPrintf("connect follower 2\n")
 
 	cfg.one(104, servers, true)
 
@@ -882,6 +940,7 @@ func TestFigure82C(t *testing.T) {
 			}
 		}
 	}
+	TPrintf("start all\n")
 
 	for i := 0; i < servers; i++ {
 		if cfg.rafts[i] == nil {
@@ -889,6 +948,7 @@ func TestFigure82C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
+	TPrintf("finial request\n")
 
 	cfg.one(rand.Int(), servers, true)
 
@@ -918,6 +978,8 @@ func TestUnreliableAgree2C(t *testing.T) {
 	cfg.setunreliable(false)
 
 	wg.Wait()
+
+	TPrintf("wait done\n")
 
 	cfg.one(100, servers, true)
 
