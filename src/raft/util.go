@@ -7,6 +7,8 @@ import (
 
 // Debugging
 var Debug bool = false
+var TDebug bool = false
+var All_Log bool = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	log.SetFlags(log.Lmicroseconds)
@@ -16,8 +18,6 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	}
 	return
 }
-
-var TDebug bool = false
 
 func TPrintf(format string, a ...interface{}) (n int, err error) {
 	log.SetFlags(log.Lmicroseconds)
@@ -29,7 +29,11 @@ func TPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 func TRaftPrintAllLogs(cfg *config) {
+	log.SetFlags(log.Lmicroseconds)
 	for _, v := range cfg.rafts {
-		DPrintf("%v\n", v)
+		if All_Log {
+			log.Printf("%v\n", v)
+			os.Stdout.Sync()
+		}
 	}
 }

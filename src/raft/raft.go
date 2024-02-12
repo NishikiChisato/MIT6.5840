@@ -126,7 +126,6 @@ type Raft struct {
 	vote_for        atomic.Value // server id of this follower vote for
 	committed_index atomic.Value // index of last committed log entry
 	last_applied    atomic.Value // index of last applied to state machine
-	election_rounds atomic.Value
 
 	logs []*LogType // store log, first index is 1
 
@@ -181,7 +180,6 @@ func (rf *Raft) persist() {
 	rf_persist.Vote_For = rf.getVoteFor()
 	rf_persist.Committed_Index = rf.getCommittedIndex()
 	rf_persist.Last_Applied = rf.getLastApplied()
-	rf_persist.Election_Rounds = rf.getElectionRounds()
 	for i := 1; i < rf.getLogLen(); i++ {
 		rf_persist.Logs = append(rf_persist.Logs, rf.getLogEntry(i))
 	}
@@ -209,7 +207,6 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.yyy = yyy
 	// }
 	buf := bytes.NewBuffer(data)
-	//fmt.Printf("[readpersist] [server]: %v, [buf]: %v\n", rf.getServerId(), buf.Bytes())
 	decoder := labgob.NewDecoder(buf)
 	var content PersistType
 	if decoder.Decode(&content) == nil {
@@ -218,7 +215,6 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.setVoteFor(content.Vote_For)
 		rf.setCommittedIndex(content.Committed_Index)
 		rf.setLastApplied(content.Last_Applied)
-		rf.setElectionRounds(content.Election_Rounds)
 		for _, log := range content.Logs {
 			rf.appendLogEntry(log)
 		}
@@ -238,10 +234,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 func (rf *Raft) String() string {
 	var res string
-	res += fmt.Sprintf("[id]: %v, [cnt]: %v, [state]: %v\n", rf.getServerId(), rf.getCnt(), rf.getState())
+	res += fmt.Sprintf("[id]: %v, [cnt]: %v, [state]: %v, [killed]: %v\n", rf.getServerId(), rf.getCnt(), rf.getState(), rf.killed())
 	res += fmt.Sprintf("[current]: [term]: %v, [idx]: %v\n", rf.getCurrentTerm(), rf.getCurrentIndex())
 	res += fmt.Sprintf("[committed_index]: %v, [last_applied]: %v\n", rf.getCommittedIndex(), rf.getLastApplied())
-	res += fmt.Sprintf("[vote for]: %v, [election rounds]: %v\n", rf.getVoteFor(), rf.getElectionRounds())
+	res += fmt.Sprintf("[vote for]: %v\n", rf.getVoteFor())
 	logs := rf.getLogs()
 	for i, v := range logs {
 		res += fmt.Sprintf(colorCyan+"[log]: [idx]: %v, [val]: %v\n"+colorReset, i, v)
@@ -397,22 +393,6 @@ func (rf *Raft) addLastApplied() {
 	rf.persist()
 }
 
-func (rf *Raft) getElectionRounds() int {
-	z := rf.election_rounds.Load()
-	return z.(int)
-}
-
-func (rf *Raft) addElectionRounds() {
-	z := rf.election_rounds.Load()
-	rf.election_rounds.Store(z.(int) + 1)
-	rf.persist()
-}
-
-func (rf *Raft) setElectionRounds(val int) {
-	rf.election_rounds.Store(val)
-	rf.persist()
-}
-
 func (rf *Raft) resetElectionTimeout() {
 	rf.mu.Lock()
 	rf.leader_election_timestamp = time.Now()
@@ -556,11 +536,10 @@ func (rf *Raft) setHeartbeatTimestamp(val time.Time) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Candidate_term            int // candidate term
-	Candidate_Id              int // candidate id
-	Last_Log_Index            int // index of last log entry in candidate
-	Last_Log_Term             int // term of log entry pointed by Last_Log_Index
-	Candidate_Election_Rounds int // the rounds of candidate elcetion
+	Candidate_term int // candidate term
+	Candidate_Id   int // candidate id
+	Last_Log_Index int // index of last log entry in candidate
+	Last_Log_Term  int // term of log entry pointed by Last_Log_Index
 }
 
 // example RequestVote RPC reply structure.
@@ -572,100 +551,101 @@ type RequestVoteReply struct {
 	Debug_Info string
 }
 
-func (rf *Raft) RequestVoteCondition(args *RequestVoteArgs) bool {
-	rf.mu.Lock()
-	z := args.Last_Log_Term > rf.logs[rf.last_applied.Load().(int)].Term || (args.Last_Log_Term == rf.logs[rf.last_applied.Load().(int)].Term && args.Last_Log_Index >= rf.last_applied.Load().(int))
-	rf.mu.Unlock()
-	return z
+func (rf *Raft) RequestVoteVoteforCondition(args *RequestVoteArgs) bool {
+	rf_logs := rf.getLogs()
+	DPrintf("[server]: %v\n", rf.getServerId())
+	for i, l := range rf_logs {
+		DPrintf("[idx]: %v, [log]: %v\n", i, l)
+	}
+	DPrintf("[args] [last term, last index]: (%v, %v)\n", args.Last_Log_Term, args.Last_Log_Index)
+	return (args.Last_Log_Term > rf_logs[rf.getCommittedIndex()].Term || (args.Last_Log_Term == rf_logs[rf.getCommittedIndex()].Term && args.Last_Log_Index >= rf.getCommittedIndex()))
 }
 
-func (rf *Raft) RequestVoteOutdatedCondition(args *RequestVoteArgs) bool {
-	return rf.getLastApplied() < args.Last_Log_Index
+func (rf *Raft) RequestVoteFollower(args *RequestVoteArgs, reply *RequestVoteReply) {
+	if args.Candidate_term < rf.getCurrentTerm() {
+		reply.Reply_Term = rf.getCurrentTerm()
+		reply.Vote_Grant = false
+		reply.Debug_Info = "candidate's term is lower than follower"
+		return
+	}
+
+	// must greater than, equal is not allowed
+	if args.Candidate_term > rf.getCurrentTerm() {
+		rf.setCurrentTerm(args.Candidate_term)
+		if rf.RequestVoteVoteforCondition(args) {
+			rf.resetElectionTimeout()
+			rf.setVoteFor(args.Candidate_Id)
+			reply.Reply_Term = rf.getCurrentTerm()
+			reply.Vote_Grant = true
+			reply.Debug_Info = "follower vote"
+			return
+		}
+	}
+	reply.Reply_Term = rf.getCurrentTerm()
+	reply.Vote_Grant = false
+}
+
+func (rf *Raft) RequestVoteCandidate(args *RequestVoteArgs, reply *RequestVoteReply) {
+	if args.Candidate_term < rf.getCurrentTerm() {
+		reply.Reply_Term = rf.getCurrentTerm()
+		reply.Vote_Grant = false
+		reply.Debug_Info = "candidate's term is lower than candidate"
+		return
+	}
+
+	// must greater than, equal is not allowed
+	// there is a scenario that two followers simultaneously become candidate
+	// if the condition is greater than and equal to, as a consequence, two candidate both will become leader
+	if args.Candidate_term > rf.getCurrentTerm() {
+		rf.setCurrentTerm(args.Candidate_term)
+		if rf.RequestVoteVoteforCondition(args) {
+			rf.resetElectionTimeout()
+			rf.setState(Follower)
+			rf.setVoteFor(args.Candidate_Id)
+			reply.Reply_Term = rf.getCurrentTerm()
+			reply.Vote_Grant = true
+			return
+		}
+	}
+	reply.Reply_Term = rf.getCurrentTerm()
+	reply.Vote_Grant = false
+}
+
+func (rf *Raft) RequestVoteLeader(args *RequestVoteArgs, reply *RequestVoteReply) {
+	if args.Candidate_term < rf.getCurrentTerm() {
+		reply.Reply_Term = rf.getCurrentTerm()
+		reply.Vote_Grant = false
+		reply.Debug_Info = "candidate's term is lower than leader"
+		return
+	}
+
+	// must greater than, equal is not allowed
+	if args.Candidate_term > rf.getCurrentTerm() {
+		rf.setCurrentTerm(args.Candidate_term)
+		if rf.RequestVoteVoteforCondition(args) {
+			rf.resetElectionTimeout()
+			rf.setState(Follower)
+			rf.setVoteFor(args.Candidate_Id)
+			reply.Reply_Term = rf.getCurrentTerm()
+			reply.Vote_Grant = true
+			reply.Debug_Info = "leader vote"
+			return
+		}
+	}
+	reply.Reply_Term = rf.getCurrentTerm()
+	reply.Vote_Grant = false
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	if rf.isFollower() {
-		if args.Candidate_term < rf.getCurrentTerm() {
-			reply.Reply_Term = rf.getCurrentTerm()
-			reply.Vote_Grant = false
-			//reply.Debug_Info = "candidate's term is lower than server's"
-			return
-		}
-		if rf.RequestVoteOutdatedCondition(args) {
-			// candidate own the latest log entries
-			rf.resetElectionTimeout()
-			rf.setVoteFor(args.Candidate_Id)
-			rf.setCurrentTerm(args.Candidate_term)
-			reply.Reply_Term = rf.getCurrentTerm()
-			reply.Vote_Grant = true
-			return
-		}
-		if args.Candidate_Election_Rounds == rf.getElectionRounds() {
-			reply.Reply_Term = rf.getCurrentTerm()
-			reply.Vote_Grant = false
-			//reply.Debug_Info = "current server has vote yet"
-			//reply.Debug_Info = fmt.Sprintf("current server has vote yet, [server rounds]: %v", rf.election_rounds)
-			return
-		} else {
-			rf.setElectionRounds(args.Candidate_Election_Rounds)
-			rf.setVoteFor(-1)
-		}
-		// we should use last log term and last log index to compare
-		if rf.isVoteFor() && rf.RequestVoteCondition(args) {
-			rf.resetElectionTimeout()
-			rf.setVoteFor(args.Candidate_Id)
-			rf.setCurrentTerm(args.Candidate_term)
-
-			reply.Reply_Term = rf.getCurrentTerm()
-			reply.Vote_Grant = true
-			// reply.Debug_Info = "vote success"
-		} else {
-			rf.setCurrentTerm(args.Candidate_term)
-
-			reply.Reply_Term = rf.getCurrentTerm()
-			reply.Vote_Grant = false
-			//reply.Debug_Info = "candidate's log lags behind server's"
-		}
-	} else if rf.isCandidate() {
-		if rf.RequestVoteOutdatedCondition(args) {
-			rf.resetElectionTimeout()
-			rf.setCurrentTerm(args.Candidate_term)
-			rf.setVoteFor(args.Candidate_Id)
-			rf.setState(Follower)
-			reply.Reply_Term = rf.getCurrentTerm()
-			reply.Vote_Grant = true
-			return
-		}
-		if args.Candidate_term > rf.getCurrentTerm() {
-			rf.resetElectionTimeout()
-			rf.setCurrentTerm(args.Candidate_term)
-			rf.setState(Follower)
-		}
-		reply.Reply_Term = rf.getCurrentTerm()
-		reply.Vote_Grant = false
-		//reply.Debug_Info = "server is candidate, not vote"
-	} else if rf.isLeader() {
-		// leader
-		// current leader doesn't own all committed log entries
-		if rf.RequestVoteOutdatedCondition(args) {
-			rf.resetElectionTimeout()
-			rf.setCurrentTerm(args.Candidate_term)
-			rf.setVoteFor(args.Candidate_Id)
-			rf.setState(Follower)
-			reply.Reply_Term = rf.getCurrentTerm()
-			reply.Vote_Grant = true
-			return
-		}
-		if args.Candidate_term > rf.getCurrentTerm() {
-			rf.resetElectionTimeout()
-			rf.setCurrentTerm(args.Candidate_term)
-			rf.setState(Follower)
-		}
-		reply.Reply_Term = rf.getCurrentTerm()
-		reply.Vote_Grant = false
-		//reply.Debug_Info = "server is leader, not vote"
+	switch rf.getState() {
+	case Follower:
+		rf.RequestVoteFollower(args, reply)
+	case Candidate:
+		rf.RequestVoteCandidate(args, reply)
+	case Leader:
+		rf.RequestVoteLeader(args, reply)
 	}
 }
 
@@ -679,171 +659,152 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Reply_term     int  // server's term, used for leader to update its own term(but it will revert to follower if condition satified)
-	Success        bool // indicate success of current RPC(true is success)
-	Identification ServerState
-	IsOutdated     bool
-	Xterm          int // for fast recovery
-	XIndex         int
-	Debug_Info     string
+	Reply_term int  // server's term, used for leader to update its own term(but it will revert to follower if condition satified)
+	Success    bool // indicate success of current RPC(true is success)
+	// to mark whether current leader is outdated
+	// the leader is outdated: term is lower or log is outdated
+	Xterm      int // for fast recovery
+	XIndex     int
+	Debug_Info string
 }
 
 func (rf *Raft) AppendEntriesCondition(args *AppendEntriesArgs) bool {
-	rf.mu.Lock()
-	z := (args.Prev_Log_Index < len(rf.logs) && args.Prev_Log_Index >= 0 && rf.logs[args.Prev_Log_Index].Term != args.Prev_Log_Term)
-	rf.mu.Unlock()
-	return z
+	rf_logs := rf.getLogs()
+	return (args.Prev_Log_Index < rf.getLogLen() && args.Prev_Log_Index >= 0 && rf_logs[args.Prev_Log_Index].Term == args.Prev_Log_Term)
 }
 
-func (rf *Raft) AppendEntriesOutdatedCondition(args *AppendEntriesArgs) bool {
+func (rf *Raft) AppendEntriesCommittedOutdated(args *AppendEntriesArgs) bool {
 	return args.Leader_committed_index < rf.getLastApplied()
 }
 
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if rf.isFollower() {
-		if args.Leader_term < rf.getCurrentTerm() {
-			reply.Reply_term = rf.getCurrentTerm()
-			reply.Success = false
-			reply.Xterm = -1
-			reply.XIndex = rf.getLogLen()
-			reply.Identification = Follower
-			//reply.Debug_Info = "[server]: follower, leader's term is lower than follower's"
-			return
-		}
+func (rf *Raft) AppendEntriesFollower(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if args.Leader_term < rf.getCurrentTerm() || rf.AppendEntriesCommittedOutdated(args) {
+		reply.Reply_term = rf.getCurrentTerm()
+		reply.Success = false
+		return
+	}
 
-		if rf.AppendEntriesOutdatedCondition(args) {
-			// we can not reset election_timeout
-			reply.Reply_term = rf.getCurrentTerm()
-			reply.Success = false
-			reply.Xterm = -1
-			reply.XIndex = rf.getLogLen()
-			reply.Identification = Follower
-			reply.IsOutdated = true
-			//reply.Debug_Info = "[server]: follower, leader inconsistency"
-			return
-		}
-
-		// reset election timeout
-		rf.resetElectionTimeout()
-
-		if len(args.Entries) == 0 {
-			// update server's term
-			rf.setCurrentTerm(args.Leader_term)
-			// reset server's vote_for
-			rf.setVoteFor(-1)
-			rf.setCommittedIndex(min(rf.getCurrentIndex(), args.Leader_committed_index))
-			for i := rf.getLastApplied(); i < rf.getCommittedIndex(); i++ {
-				rf.addLastApplied()
-				rf.applyLogEntry(rf.getLastApplied())
-			}
-
-			reply.Reply_term = rf.getCurrentTerm()
-			reply.Success = true
-			reply.Identification = Follower
-			//reply.Debug_Info = "[server]: follower, log entry is empty, success"
-			return
-		}
-
-		// follower don't have log entry in Prev_Log_Index
-		if args.Prev_Log_Index >= rf.getLogLen() {
-			reply.Reply_term = rf.getCurrentTerm()
-			reply.Xterm = -1
-			reply.XIndex = rf.getLogLen()
-			reply.Success = false
-			reply.Identification = Follower
-			return
-		}
-
-		// if the term of log entry pointed by Prev_Log_Index in follower not matchs Prev_Log_Term
-		if len(rf.getLogs()) != 0 && rf.AppendEntriesCondition(args) {
-			XTerm, XIndex := rf.getLogEntry(args.Prev_Log_Index).Term, -1
-			for i := 1; i < rf.getLogLen(); i++ {
-				if log := rf.getLogEntry(i); log.Term == XTerm {
-					XIndex = i
-					break
-				}
-			}
-			reply.Xterm = XTerm
-			reply.XIndex = XIndex
-			reply.Identification = Follower
-			reply.Reply_term = rf.getCurrentTerm()
-			reply.Success = false
-			return
-		}
-		// replicate log entries in AppendEntries to follower
-		// if inconsistency occurs, delete the following log entries at that point in follower
-		// if control flow can reach here, it means that log entry pointed by Prev_Log_Index in rf.logs is matched with Prev_Log_Term
-		// the start_index is assigned when inconsistency occurs
-		// Deduplication is needed!!!!!
-		start_index := 0
-		for i, j := args.Prev_Log_Index+1, 0; i < rf.getLogLen() && j < len(args.Entries); i++ {
-			log := rf.getLogEntry(i)
-			term, command := log.Term, log.Command
-			if term != args.Entries[j].Term || command != args.Entries[j].Command {
-				// delete the following element
-				// rf.logs = rf.logs[:i]
-				logs := rf.getLogs()
-				rf.setLogs(logs[:i])
-				rf.setCurrentIndex(rf.getLogLen() - 1)
-				break
-			} else {
-				start_index++
-			}
-			j++
-		}
-		// append all log entries to rf.logs
-		for i := start_index; i < len(args.Entries); i++ {
-			// rf.logs = append(rf.logs, args.Entries[i])
-			rf.appendLogEntry(*args.Entries[i])
-		}
-		rf.setCurrentIndex(rf.getLogLen() - 1)
+	if len(args.Entries) == 0 {
 		rf.setCurrentTerm(args.Leader_term)
+		rf.setVoteFor(-1)
 		rf.setCommittedIndex(min(rf.getCurrentIndex(), args.Leader_committed_index))
+		for i := rf.getLastApplied(); i < rf.getCommittedIndex(); i++ {
+			rf.addLastApplied()
+			rf.applyLogEntry(rf.getLastApplied())
+		}
 		rf.resetElectionTimeout()
 
 		reply.Reply_term = rf.getCurrentTerm()
 		reply.Success = true
-		reply.Identification = Follower
-		//reply.Debug_Info = fmt.Sprintf("[server]: follower: %v, append success, [current_idx]: %v, [log len]: %v\n", rf.server_id, rf.current_index, len(rf.logs))
-	} else if rf.isCandidate() {
-		if rf.AppendEntriesOutdatedCondition(args) {
-			reply.Reply_term = rf.getCurrentTerm()
-			reply.Success = false
-			reply.Identification = Candidate
-			reply.IsOutdated = true
-			return
-		}
-		if args.Leader_term >= rf.getCurrentTerm() || args.Leader_committed_index >= rf.getCommittedIndex() {
-			rf.resetElectionTimeout()
-			rf.setCurrentTerm(args.Leader_term)
-			rf.setState(Follower)
-			rf.setVoteFor(-1)
-		}
+		return
+	}
 
+	// follower don't have log entry in Prev_Log_Index
+	if args.Prev_Log_Index >= rf.getLogLen() {
+		rf.resetElectionTimeout()
+		rf.setCurrentTerm(args.Leader_term)
+		rf.setVoteFor(-1)
+		reply.Reply_term = rf.getCurrentTerm()
+		reply.Xterm = -1
+		reply.XIndex = rf.getLogLen()
+		reply.Success = false
+		return
+	}
+
+	// if the term of log entry pointed by Prev_Log_Index in follower not matchs Prev_Log_Term
+	if !rf.AppendEntriesCondition(args) {
+		XTerm, XIndex := rf.getLogEntry(args.Prev_Log_Index).Term, -1
+		for i := 1; i < rf.getLogLen(); i++ {
+			if log := rf.getLogEntry(i); log.Term == XTerm {
+				XIndex = i
+				break
+			}
+		}
+		rf.resetElectionTimeout()
+		rf.setCurrentTerm(args.Leader_term)
+		rf.setVoteFor(-1)
+		reply.Xterm = XTerm
+		reply.XIndex = XIndex
 		reply.Reply_term = rf.getCurrentTerm()
 		reply.Success = false
-		reply.Identification = Candidate
-		//reply.Debug_Info = fmt.Sprintf("[server]: candidate: %v, fault\n", rf.server_id)
-	} else {
-		// leader
-		if rf.AppendEntriesOutdatedCondition(args) {
-			reply.Reply_term = rf.getCurrentTerm()
-			reply.Success = false
-			reply.Identification = Candidate
-			reply.IsOutdated = true
-			return
+		return
+	}
+
+	// replicate log entries in AppendEntries to follower
+	// if inconsistency occurs, delete the following log entries at that point in follower
+	// if control flow can reach here, it means that log entry pointed by Prev_Log_Index in rf.logs is matched with Prev_Log_Term
+	// the start_index is assigned when inconsistency occurs
+	// Deduplication is needed!!!!!
+
+	i, j := args.Prev_Log_Index+1, 0
+	for i < rf.getLogLen() && j < len(args.Entries) {
+		log := rf.getLogEntry(i)
+		term, command := log.Term, log.Command
+		if term != args.Entries[j].Term && command != args.Entries[j] {
+			logs := rf.getLogs()
+			rf.setLogs(logs[:i])
+			// conflict_idx = j
+			break
 		}
-		if args.Leader_term >= rf.getCurrentTerm() || args.Leader_committed_index >= rf.getCommittedIndex() {
-			rf.resetElectionTimeout()
-			rf.setCurrentTerm(args.Leader_term)
+		i++
+		j++
+	}
+	if i < rf.getLogLen() {
+		logs := rf.getLogs()
+		rf.setLogs(logs[:i])
+	}
+	if j < len(args.Entries) {
+		for k := j; k < len(args.Entries); k++ {
+			rf.appendLogEntry(*args.Entries[k])
+		}
+	}
+
+	rf.setCurrentIndex(rf.getLogLen() - 1)
+	rf.setCurrentTerm(args.Leader_term)
+	rf.setVoteFor(-1)
+	rf.setCommittedIndex(min(rf.getCurrentIndex(), args.Leader_committed_index))
+	rf.resetElectionTimeout()
+
+	reply.Reply_term = rf.getCurrentTerm()
+	reply.Success = true
+}
+
+func (rf *Raft) AppendEntriesCandidate(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// must greater than and equal to
+	if args.Leader_term >= rf.getCurrentTerm() {
+		rf.setCurrentTerm(args.Leader_term)
+		if rf.AppendEntriesCondition(args) {
 			rf.setState(Follower)
+			rf.resetElectionTimeout()
 			rf.setVoteFor(-1)
 		}
+	}
+	reply.Reply_term = rf.getCurrentTerm()
+	reply.Success = false
+}
 
-		reply.Reply_term = rf.getCurrentTerm()
-		reply.Success = false
-		reply.Identification = Leader
-		//reply.Debug_Info = fmt.Sprintf("[server]: leader: %v, fault\n", rf.server_id)
+func (rf *Raft) AppendEntriesLeader(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// must greater than and equal to
+	if args.Leader_term >= rf.getCurrentTerm() {
+		rf.setCurrentTerm(args.Leader_term)
+		if rf.AppendEntriesCondition(args) {
+			rf.setState(Follower)
+			rf.resetElectionTimeout()
+			rf.setVoteFor(-1)
+		}
+	}
+	reply.Reply_term = rf.getCurrentTerm()
+	reply.Success = false
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	switch rf.getState() {
+	case Follower:
+		rf.AppendEntriesFollower(args, reply)
+	case Candidate:
+		rf.AppendEntriesCandidate(args, reply)
+	case Leader:
+		rf.AppendEntriesLeader(args, reply)
 	}
 }
 
@@ -952,7 +913,7 @@ func (rf *Raft) heartbeat_message_empty() {
 			var ae_reply AppendEntriesReply
 			ae_args = AppendEntriesArgs{Leader_term: rf.getCurrentTerm(), Leader_id: rf.getServerId(),
 				Prev_Log_Index: next_index[idx] - 1, Prev_Log_Term: logs[next_index[idx]-1].Term,
-				Leader_committed_index: rf.getLastApplied()}
+				Leader_committed_index: rf.getCommittedIndex()}
 			ae_reply = AppendEntriesReply{}
 			ok := rf.sendAppendEntries(idx, &ae_args, &ae_reply)
 			if !ok {
@@ -969,8 +930,6 @@ func (rf *Raft) heartbeat_message_with_log() {
 	rf.resetHeartbeatTimeout()
 	rf_logs := rf.getLogs()
 
-	// a new log entry appended to leader
-
 	for i := 0; i < rf.getCnt(); i++ {
 		go func(idx int) {
 			if idx == rf.getServerId() {
@@ -983,35 +942,31 @@ func (rf *Raft) heartbeat_message_with_log() {
 			// nxt_idx := rf.next_index[idx]
 			rf.index_latch.Lock()
 			nxt_idx := rf.getNextIndex()[idx]
+			logs := rf.getLogs()
 			rf.index_latch.Unlock()
 			if nxt_idx > rf.getLogLen() {
 				return
 			}
-			// fmt.Printf("[leader]: %v, [idx]: %v, [next idx]: %v\n", rf.server_id, idx, rf_next_index[idx])
-			// log_entries := rf_logs[nxt_idx:]
 			log_entries := rf_logs[nxt_idx:]
 			replicated_len := len(log_entries)
 			ae_args = AppendEntriesArgs{Leader_term: rf.getCurrentTerm(), Leader_id: rf.getServerId(),
-				Prev_Log_Index: nxt_idx - 1, Prev_Log_Term: rf.getLogs()[nxt_idx-1].Term,
-				Entries: log_entries, Leader_committed_index: rf.getLastApplied()}
+				Prev_Log_Index: nxt_idx - 1, Prev_Log_Term: logs[nxt_idx-1].Term,
+				Entries: log_entries, Leader_committed_index: rf.getCommittedIndex()}
 			ae_reply = AppendEntriesReply{}
 			ok := rf.sendAppendEntries(idx, &ae_args, &ae_reply)
 			if !ok {
 				return
 			}
+			DPrintf(colorCyan+"[server]: %v, [idx]: %v\n"+colorReset, rf.getServerId(), idx)
+			DPrintf("[reply term]: %v\n", ae_reply.Reply_term)
 			// if outdated is true, irrespective of server type, current leader should step down
-			if ae_reply.Reply_term > rf.getCurrentTerm() || ae_reply.IsOutdated {
+			if ae_reply.Reply_term > rf.getCurrentTerm() {
+				rf.setCurrentTerm(ae_reply.Reply_term)
 				rf.resetElectionTimeout()
 				rf.setState(Follower)
 				return
 			}
-			if ae_reply.Identification != Follower {
-				return
-			}
 			if !ae_reply.Success {
-				// if rf.getNextIndex()[idx] > 1 {
-				// 	rf.addNextIndex(idx, -1)
-				// }
 				has_xterm := false
 				idx_xterm := -1
 				for i := 1; i < rf.getLogLen(); i++ {
@@ -1023,9 +978,13 @@ func (rf *Raft) heartbeat_message_with_log() {
 				}
 				rf.index_latch.Lock()
 				if has_xterm {
-					rf.setNextIndex(idx, idx_xterm+1)
+					if idx_xterm >= 0 {
+						rf.setNextIndex(idx, idx_xterm+1)
+					}
 				} else {
-					rf.setNextIndex(idx, ae_reply.XIndex)
+					if ae_reply.XIndex >= 1 {
+						rf.setNextIndex(idx, ae_reply.XIndex)
+					}
 				}
 				rf.index_latch.Unlock()
 			} else {
@@ -1047,6 +1006,12 @@ func (rf *Raft) check_commit() {
 	if try_committed_index >= rf.getLogLen() {
 		return
 	}
+	// the problem in figure 8 is that a leader create a log entry and it crash before it commit this log entry
+	// this log entry may not replicated or may replicated in a majority of follower
+	// in the latter case, this log entry will be considered committed from leader's standpoint
+	// in order for eliminating the issue of figure 8, the commit action in different log entry are different
+	// in case of log entries with previous term, only log entries with current term have committed, those log entries can apply
+	// in case of log entries with current term, when it replicated in a majority of follower, can treat it committed
 	rf.index_latch.Lock()
 	nxt_idx := rf.getNextIndex()
 	for _, val := range nxt_idx {
@@ -1069,7 +1034,6 @@ func (rf *Raft) check_commit() {
 func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 	// initialize a new election, reset property
 	rf.resetElectionTimeout()
-	rf.addElectionRounds()
 	rf.addCurrentTerm()
 	rf.setVoteFor(rf.getServerId())
 
@@ -1084,14 +1048,19 @@ func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 				return
 			}
 			rv_args := RequestVoteArgs{Candidate_term: rf.getCurrentTerm(),
-				Candidate_Id:              rf.getServerId(),
-				Last_Log_Index:            rf.getLastApplied(),
-				Last_Log_Term:             rf.getLogs()[rf.getLastApplied()].Term,
-				Candidate_Election_Rounds: rf.getElectionRounds()}
+				Candidate_Id:   rf.getServerId(),
+				Last_Log_Index: rf.getCommittedIndex(),
+				Last_Log_Term:  rf.getLogs()[rf.getCommittedIndex()].Term}
+
 			rv_reply := RequestVoteReply{}
-			for request_vote_state.CompareAndSwap(true, true) && !rf.sendRequestVote(idx, &rv_args, &rv_reply) {
+			for request_vote_state.Load() == true && !rf.sendRequestVote(idx, &rv_args, &rv_reply) {
+				time.Sleep(time.Millisecond * time.Duration(20))
 			}
-			if rv_reply.Reply_Term > rf.getCurrentTerm() {
+			DPrintf("[request vote]  [server]: %v, [term]: %v, [obj]: %v, [reply term, vote grant]: (%v, %v)\n", rf.getServerId(), rf.getCurrentTerm(), idx, rv_reply.Reply_Term, rv_reply.Vote_Grant)
+			DPrintf("[args]: %v\n", rv_args)
+			DPrintf("[debug]: %v\n", rv_reply.Debug_Info)
+			// candidate discover a higher term or the existence of leader, should convert to follower
+			if rf.getCurrentTerm() < rv_reply.Reply_Term {
 				rf.setCurrentTerm(rv_reply.Reply_Term)
 				rf.setState(Follower)
 				rf.setVoteFor(-1)
@@ -1112,11 +1081,9 @@ func (rf *Raft) CandidateRequestVotes(election_timeout int) int {
 }
 
 func (rf *Raft) ticker() {
-	election_timeout := 300 + (rand.Int31() % 400)
+	election_timeout := 200 + (rand.Int31() % 200)
 	heartbeat_timeout := 100
 	for !rf.killed() {
-		// atomic variable, there is no race condition
-		//fmt.Printf("[server id]: %v, [state]: %v, [term]: %v, [dead]: %v\n", rf.server_id, rf.state, rf.current_term, rf.dead)
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
@@ -1125,18 +1092,15 @@ func (rf *Raft) ticker() {
 		if rf.isFollower() {
 			// when thread sleeps, cannot hold lock!!!
 			time.Sleep(time.Millisecond * time.Duration(election_timeout))
-			// fmt.Printf(colorBlue+"[follower] [server id]: %v, current follower\n"+colorReset, rf.server_id)
-			if rf.isVoteFor() && time.Since(rf.getLeaderElectionTimestamp()) >= time.Millisecond*time.Duration(election_timeout) {
+			if time.Since(rf.getLeaderElectionTimestamp()) >= time.Millisecond*time.Duration(election_timeout) {
 				// initialize a new election
 				rf.setState(Candidate)
 			}
 		} else if rf.isCandidate() {
 			votes := rf.CandidateRequestVotes(int(election_timeout))
-
 			if rf.isFollower() {
 				continue
 			}
-
 			if votes >= (rf.getCnt()+1)/2 {
 				DPrintf(colorRed+"[become leader]: %v\n"+colorReset, rf.getServerId())
 				rf.setState(Leader)
@@ -1147,17 +1111,11 @@ func (rf *Raft) ticker() {
 		} else if rf.isLeader() {
 
 			if time.Since(rf.getHeartbeatTimestamp()) >= time.Millisecond*time.Duration(heartbeat_timeout) {
-				// heartbeat messages
 				// reset heartbeat timeout
 				rf.resetHeartbeatTimeout()
 
-				// a new log entry appended to leader
-				// if rf_committed_index+1 < len(rf_logs) {
-				// 	rf.heartbeat_message_with_log()
-				// } else {
-				// 	rf.heartbeat_message_empty()
-				// }
 				rf.heartbeat_message_with_log()
+				time.Sleep(time.Millisecond * time.Duration(heartbeat_timeout))
 				// judgement must be made here
 				if !rf.isLeader() {
 					continue
@@ -1200,8 +1158,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.current_index.Store(0) // there are always one log entry in each server
 	rf.committed_index.Store(0)
 	rf.last_applied.Store(0)
-	rf.election_rounds.Store(0)
+	atomic.StoreInt32(&rf.dead, 0)
 	rf.leader_election_timestamp = time.Now()
+	rf.heart_beat_timestamp = time.Now()
 
 	// every server initially has one log entry
 	rf.logs = append(rf.logs, &LogType{Term: 0})

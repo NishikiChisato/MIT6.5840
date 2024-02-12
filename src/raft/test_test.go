@@ -486,9 +486,12 @@ func TestRejoin2B(t *testing.T) {
 	cfg.disconnect(leader2)
 
 	TPrintf("[leader 2]: %v\n", leader2)
+	TRaftPrintAllLogs(cfg)
 
 	// old leader connected again
 	cfg.connect(leader1)
+
+	TRaftPrintAllLogs(cfg)
 
 	cfg.one(104, 2, true)
 
@@ -906,6 +909,8 @@ func TestFigure82C(t *testing.T) {
 
 	cfg.one(rand.Int(), 1, true)
 
+	TPrintf("first request\n")
+
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
 		leader := -1
@@ -927,12 +932,14 @@ func TestFigure82C(t *testing.T) {
 		}
 
 		if leader != -1 {
+			TPrintf("clush leader: %v\n", leader)
 			cfg.crash1(leader)
 			nup -= 1
 		}
 
 		if nup < 3 {
 			s := rand.Int() % servers
+			TPrintf("the number of server is lower than 3, restart a server: %v\n", s)
 			if cfg.rafts[s] == nil {
 				cfg.start1(s, cfg.applier)
 				cfg.connect(s)
@@ -944,11 +951,13 @@ func TestFigure82C(t *testing.T) {
 
 	for i := 0; i < servers; i++ {
 		if cfg.rafts[i] == nil {
+			DPrintf("start: %v\n", i)
 			cfg.start1(i, cfg.applier)
 			cfg.connect(i)
 		}
 	}
 	TPrintf("finial request\n")
+	TRaftPrintAllLogs(cfg)
 
 	cfg.one(rand.Int(), servers, true)
 
@@ -986,6 +995,64 @@ func TestUnreliableAgree2C(t *testing.T) {
 	cfg.end()
 }
 
+func TestMyFigure8Unreliable(t *testing.T) {
+	servers := 5
+	cfg := make_config(t, servers, true, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2C): Figure 8 (unreliable)")
+
+	cfg.one(rand.Int()%10000, 1, true)
+
+	TPrintf("first request\n")
+	TRaftPrintAllLogs(cfg)
+
+	nup := servers
+	for iters := 0; iters < 1000; iters++ {
+		leader := -1
+		for i := 0; i < servers; i++ {
+			_, _, ok := cfg.rafts[i].Start(rand.Int() % 10000)
+			if ok && cfg.connected[i] {
+				leader = i
+			}
+		}
+
+		if (rand.Int() % 1000) < 100 {
+			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		} else {
+			ms := (rand.Int63() % 13)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+
+		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
+			cfg.disconnect(leader)
+			nup -= 1
+		}
+
+		if nup < 3 {
+			s := rand.Int() % servers
+			if cfg.connected[s] == false {
+				cfg.connect(s)
+				nup += 1
+			}
+		}
+	}
+
+	TPrintf("connect all\n")
+	TRaftPrintAllLogs(cfg)
+
+	for i := 0; i < servers; i++ {
+		if cfg.connected[i] == false {
+			cfg.connect(i)
+		}
+	}
+
+	cfg.one(rand.Int()%10000, servers, true)
+
+	cfg.end()
+}
+
 func TestFigure8Unreliable2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true, false)
@@ -994,6 +1061,9 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	cfg.begin("Test (2C): Figure 8 (unreliable)")
 
 	cfg.one(rand.Int()%10000, 1, true)
+
+	TPrintf("first request\n")
+	TRaftPrintAllLogs(cfg)
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
@@ -1029,6 +1099,9 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			}
 		}
 	}
+
+	TPrintf("connect all\n")
+	TRaftPrintAllLogs(cfg)
 
 	for i := 0; i < servers; i++ {
 		if cfg.connected[i] == false {

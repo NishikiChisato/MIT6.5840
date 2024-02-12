@@ -161,6 +161,7 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
+
 			// log.Printf(colorRed+"[err]: %v\n"+colorReset, err_msg)
 			// for idx, elem := range cfg.logs {
 			// 	arr := BYKV{}
@@ -171,6 +172,10 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 			// 	for _, val := range arr {
 			// 		fmt.Printf("[server id]: %v, [val]: %v\n", idx, val)
 			// 	}
+			// }
+			// for i, r := range cfg.rafts {
+			// 	fmt.Printf("[server]: %v\n", i)
+			// 	fmt.Printf("%v\n", r.String())
 			// }
 		}
 	}
