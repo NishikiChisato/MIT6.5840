@@ -951,7 +951,6 @@ func TestFigure82C(t *testing.T) {
 
 	for i := 0; i < servers; i++ {
 		if cfg.rafts[i] == nil {
-			DPrintf("start: %v\n", i)
 			cfg.start1(i, cfg.applier)
 			cfg.connect(i)
 		}
@@ -991,64 +990,6 @@ func TestUnreliableAgree2C(t *testing.T) {
 	TPrintf("wait done\n")
 
 	cfg.one(100, servers, true)
-
-	cfg.end()
-}
-
-func TestMyFigure8Unreliable(t *testing.T) {
-	servers := 5
-	cfg := make_config(t, servers, true, false)
-	defer cfg.cleanup()
-
-	cfg.begin("Test (2C): Figure 8 (unreliable)")
-
-	cfg.one(rand.Int()%10000, 1, true)
-
-	TPrintf("first request\n")
-	TRaftPrintAllLogs(cfg)
-
-	nup := servers
-	for iters := 0; iters < 1000; iters++ {
-		leader := -1
-		for i := 0; i < servers; i++ {
-			_, _, ok := cfg.rafts[i].Start(rand.Int() % 10000)
-			if ok && cfg.connected[i] {
-				leader = i
-			}
-		}
-
-		if (rand.Int() % 1000) < 100 {
-			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-		} else {
-			ms := (rand.Int63() % 13)
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-		}
-
-		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
-			cfg.disconnect(leader)
-			nup -= 1
-		}
-
-		if nup < 3 {
-			s := rand.Int() % servers
-			if cfg.connected[s] == false {
-				cfg.connect(s)
-				nup += 1
-			}
-		}
-	}
-
-	TPrintf("connect all\n")
-	TRaftPrintAllLogs(cfg)
-
-	for i := 0; i < servers; i++ {
-		if cfg.connected[i] == false {
-			cfg.connect(i)
-		}
-	}
-
-	cfg.one(rand.Int()%10000, servers, true)
 
 	cfg.end()
 }
@@ -1101,7 +1042,6 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	}
 
 	TPrintf("connect all\n")
-	TRaftPrintAllLogs(cfg)
 
 	for i := 0; i < servers; i++ {
 		if cfg.connected[i] == false {
