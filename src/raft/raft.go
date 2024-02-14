@@ -298,11 +298,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.electionTimestamp = time.Now()
 
-		last_index := len(rf.logs) - 1
-		last_term := rf.logs[last_index].Term
+		if args.PrevLogIndex >= len(rf.logs) {
+			reply.Success, reply.Xterm, reply.XIndex = false, -1, len(rf.logs)
+			return
+		}
 
-		if (args.PrevLogIndex == 0 || args.PrevLogIndex < len(rf.logs)) && (rf.logs[args.PrevLogIndex].Term != last_term) {
-			reply.Success = false
+		if (args.PrevLogIndex == 0 || args.PrevLogIndex < len(rf.logs)) && (rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
+			reply.Success, reply.Xterm, reply.XIndex = false, rf.logs[args.PrevLogIndex].Term, -1
+			for i := 0; i < len(rf.logs); i++ {
+				if rf.logs[i].Term == rf.logs[args.PrevLogIndex].Term {
+					reply.XIndex = i
+					break
+				}
+			}
+			return
 		}
 
 		conflict_index, append_index := args.PrevLogIndex+1, 0
@@ -594,7 +603,29 @@ func (rf *Raft) heartbeatMessage() {
 						}
 					}
 				} else {
-					rf.nextIndex[idx]--
+					// not optimized code
+					// rf.nextIndex[idx]--
+					if reply.Xterm == -1 && reply.XIndex == -1 {
+						// Xterm == -1 and XIndex == -1
+						rf.nextIndex[idx]--
+						EPrintf("decrease 1\n")
+					} else if reply.Xterm == -1 {
+						// Xterm == -1 and (XIndex == -1 or XIndex != -1)
+						EPrintf("decrease %v\n", rf.nextIndex[idx]-reply.XIndex)
+						rf.nextIndex[idx] = reply.XIndex
+					} else {
+						// Xterm != -1 and XIndex != -1
+						nxt_idx := 1
+						for i := 0; i < len(rf.logs); i++ {
+							if rf.logs[i].Term == reply.Xterm {
+								nxt_idx = i
+								break
+							}
+						}
+						EPrintf("decrease %v\n", rf.nextIndex[idx]-nxt_idx)
+						rf.nextIndex[idx] = nxt_idx
+					}
+
 				}
 				rf.mu.Unlock()
 			}

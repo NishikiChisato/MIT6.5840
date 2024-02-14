@@ -9,6 +9,7 @@ import (
 // Debugging
 var Debug bool = false
 var TDebug bool = false
+var EDebug bool = true
 var All_Log bool = false
 
 func DPrintf(id int, format string, a ...interface{}) (n int, err error) {
@@ -25,6 +26,15 @@ func TPrintf(format string, a ...interface{}) (n int, err error) {
 	log.SetFlags(log.Lmicroseconds)
 	if TDebug {
 		log.Printf(colorYellow+format+colorReset, a...)
+		os.Stdout.Sync()
+	}
+	return
+}
+
+func EPrintf(format string, a ...interface{}) (n int, err error) {
+	log.SetFlags(log.Lmicroseconds)
+	if EDebug {
+		log.Printf(colorGreen+format+colorReset, a...)
 		os.Stdout.Sync()
 	}
 	return
