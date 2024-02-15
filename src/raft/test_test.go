@@ -404,6 +404,8 @@ loop:
 		wg.Wait()
 		close(is)
 
+		TPrintf("wait done")
+
 		for j := 0; j < servers; j++ {
 			if t, _ := cfg.rafts[j].GetState(); t != term {
 				// term changed -- can't expect low RPC counts

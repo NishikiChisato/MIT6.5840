@@ -90,12 +90,9 @@ type LogType struct {
 }
 
 type PersistType struct {
-	CurrentTerm     int
-	Current_Index   int
-	VoteFor         int
-	Logs            []LogType
-	Committed_Index int
-	lastApplied     int
+	CurrentTerm int
+	VoteFor     int
+	Logs        []LogType
 }
 
 func min(x, y int) int {
@@ -110,6 +107,11 @@ func max(x, y int) int {
 		return x
 	}
 	return y
+}
+
+type DebugMsg struct {
+	apply ApplyMsg
+	msg   string
 }
 
 // A Go object implementing a single Raft peer.
@@ -132,13 +134,18 @@ type Raft struct {
 	electionTimestamp time.Time   // timestamp for leader election
 
 	// log replicated
-	logs        []LogType
-	lastApplied int
-	commitIndex int
-	commitCond  *sync.Cond
-	nextIndex   map[int]int
-	matchIndex  map[int]int
-	tester      chan ApplyMsg
+	logs           []LogType
+	lastApplied    int
+	commitIndex    int
+	commitCond     *sync.Cond
+	nextIndex      map[int]int
+	matchIndex     map[int]int
+	tester         chan ApplyMsg
+	sendTrigger    chan struct{}
+	batchTimestamp time.Time
+
+	// persist
+	logDebuger chan DebugMsg
 }
 
 // return currentTerm and whether this server
@@ -173,12 +180,15 @@ func (rf *Raft) persist() {
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
 
+	DPrintf(rf.me, "persist state")
 	buf := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(buf)
-	var rf_persist PersistType
-	rf_persist.CurrentTerm = rf.currentTerm
-	rf_persist.VoteFor = rf.voteFor
-	encoder.Encode(&rf_persist)
+	var persist_storage PersistType
+	persist_storage.CurrentTerm = rf.currentTerm
+	persist_storage.VoteFor = rf.voteFor
+	persist_storage.Logs = append(persist_storage.Logs, rf.logs[1:]...)
+
+	encoder.Encode(&persist_storage)
 	raft_state := buf.Bytes()
 	rf.persister.Save(raft_state, nil)
 }
@@ -201,12 +211,16 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	DPrintf(rf.me, "recover from crash")
 	buf := bytes.NewBuffer(data)
 	decoder := labgob.NewDecoder(buf)
 	var content PersistType
 	if decoder.Decode(&content) == nil {
 		rf.currentTerm = content.CurrentTerm
 		rf.voteFor = content.VoteFor
+		rf.logs = append(rf.logs, content.Logs...)
+	} else {
+		DPrintf(rf.me, "restore from persist error")
 	}
 }
 
@@ -246,6 +260,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	DPrintf(rf.me, "[RV] [args]: %+v, [term, vote for]: (%v, %v), [logs]: %v", args, rf.currentTerm, rf.voteFor, rf.logs)
 	if rf.currentTerm < args.CandidateTerm {
 		rf.convertFollower(args.CandidateTerm)
+		rf.persist()
 	}
 	// last_index should be len(rf.logs) - 1 instead of lastApplied
 	// suppose a scenario, a disconnected leader consistently receives request, its own log will grow simultaneously
@@ -278,7 +293,7 @@ type AppendEntriesReply struct {
 	Success   bool // indicate success of current RPC(true is success)
 	// to mark whether current leader is outdated
 	// the leader is outdated: term is lower or log is outdated
-	Xterm  int // for fast recovery
+	XTerm  int // for fast recovery
 	XIndex int
 }
 
@@ -289,23 +304,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// if leader own higher term, no matter what state the server is, should convert to follower
 	if rf.currentTerm < args.LeaderTerm {
 		rf.convertFollower(args.LeaderTerm)
+		rf.persist()
 	}
 	reply.Success = false
 	if rf.currentTerm == args.LeaderTerm {
 		// state is candidate but term is the same as leader
 		if rf.state != Follower {
 			rf.convertFollower(args.LeaderTerm)
+			rf.persist()
 		}
 		rf.electionTimestamp = time.Now()
 
 		if args.PrevLogIndex >= len(rf.logs) {
-			reply.Success, reply.Xterm, reply.XIndex = false, -1, len(rf.logs)
+			reply.XTerm, reply.XIndex, reply.ReplyTerm = -1, len(rf.logs), rf.currentTerm
 			return
 		}
 
 		if (args.PrevLogIndex == 0 || args.PrevLogIndex < len(rf.logs)) && (rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
-			reply.Success, reply.Xterm, reply.XIndex = false, rf.logs[args.PrevLogIndex].Term, -1
-			for i := 0; i < len(rf.logs); i++ {
+			reply.XTerm, reply.XIndex, reply.ReplyTerm = rf.logs[args.PrevLogIndex].Term, -1, rf.currentTerm
+			for i := 1; i < len(rf.logs); i++ {
 				if rf.logs[i].Term == rf.logs[args.PrevLogIndex].Term {
 					reply.XIndex = i
 					break
@@ -331,7 +348,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.logs = append(rf.logs[:conflict_index], args.Entries[append_index:]...)
 		DPrintf(rf.me, "[AE] [after log]: %v", rf.logs)
 
+		rf.persist()
+
 		if rf.commitIndex < args.LeaderCommit {
+			// we can simply set rf.commitIndex = args.LeaderCommit instead of min(args.LeaderCommit, len(rf.logs) - 1)
+			// the reason is leader always send logs from nextIndex to THE END to follower, and LeaderCommit must lower than and equal to leader's log len
+			// after follower replicates args.Entries, follower can own all logs from leader, so args.LeaderCommit must lower than and equal to len(rf.logs) - 1
+			// rf.commitIndex = int(math.Min(float64(len(rf.logs)), float64(args.LeaderCommit)))
 			rf.commitIndex = args.LeaderCommit
 			rf.commitCond.Signal()
 		}
@@ -396,12 +419,24 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if !isLeader {
 		return 0, term, false
 	}
+	DPrintf(rf.me, "[Start] state: %v", rf.state.String())
 
 	rf.mu.Lock()
 	rf.logs = append(rf.logs, LogType{Command: command, Term: term})
-	DPrintf(rf.me, "[Start] append log: %+v", rf.logs[len(rf.logs)-1])
+	rf.persist()
 	index := len(rf.logs) - 1
+	DPrintf(rf.me, "[Start] append log: %+v", rf.logs[len(rf.logs)-1])
+	save_batch_timestamp := rf.batchTimestamp
 	rf.mu.Unlock()
+
+	// once leader receives a new log entry, send AE to followers
+	// we can't hold lock when sending message to channel, dead lock will occur!!
+	if time.Since(save_batch_timestamp) > time.Millisecond*time.Duration(25) {
+		rf.mu.Lock()
+		rf.batchTimestamp = time.Now()
+		rf.mu.Unlock()
+		rf.sendTrigger <- struct{}{}
+	}
 	return index, term, true
 }
 
@@ -453,7 +488,7 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 200)
+		ms := 50 + (rand.Int63() % 100)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -479,14 +514,14 @@ func (rf *Raft) startElection() {
 			last_term := rf.logs[last_index].Term
 			rf.mu.Unlock()
 			args := RequestVoteArgs{
-				CandidateTerm: rf.currentTerm,
+				CandidateTerm: start_term,
 				CandidateId:   rf.me,
 				LastLogIndex:  last_index,
 				LastLogTerm:   last_term}
 
 			reply := RequestVoteReply{}
 
-			if rf.sendRequestVote(idx, &args, &reply) {
+			if ok := rf.sendRequestVote(idx, &args, &reply); ok {
 				rf.mu.Lock()
 				// state may have changed by other startElection instance
 				// if we omit this judgement, the term may be decreased (start_term is 2, rf.currentTerm is 5 and reply.Reply_Term is 4)
@@ -496,6 +531,7 @@ func (rf *Raft) startElection() {
 				}
 				if reply.Reply_Term > start_term {
 					rf.convertFollower(reply.Reply_Term)
+					rf.persist()
 					rf.mu.Unlock()
 					return
 				} else if reply.Reply_Term == start_term && reply.Vote_Grant {
@@ -528,24 +564,53 @@ func (rf *Raft) convertFollower(new_term int) {
 func (rf *Raft) startLeader() {
 	rf.state = Leader
 	go func() {
+		rf.heartbeatMessage()
 		heartbeat_timeout := 100
-		heartbeat_ticker := time.NewTicker(time.Millisecond * time.Duration(heartbeat_timeout))
-		defer heartbeat_ticker.Stop()
-		for {
-			rf.heartbeatMessage()
-			<-heartbeat_ticker.C
+		// timer represents one of two events
+		// - wait for 50ms
+		// - message from sendTrigger channel
+		send_timer := time.NewTimer(time.Millisecond * time.Duration(heartbeat_timeout))
+		defer send_timer.Stop()
+		for !rf.killed() {
 			rf.mu.Lock()
 			if rf.state != Leader {
 				rf.mu.Unlock()
 				return
 			}
 			rf.mu.Unlock()
+			// we would wait some time, so before we send AE, we should check current server still is leader
+			do_send := false
+			select {
+			case <-send_timer.C:
+				send_timer.Stop()
+				send_timer.Reset(time.Millisecond * time.Duration(heartbeat_timeout))
+				do_send = true
+			case _, ok := <-rf.sendTrigger:
+				if !ok {
+					return
+				}
+				if !send_timer.Stop() {
+					<-send_timer.C
+				}
+				send_timer.Reset(time.Millisecond * time.Duration(heartbeat_timeout))
+				do_send = true
+			}
+			rf.mu.Lock()
+			if rf.state != Leader {
+				rf.mu.Unlock()
+				return
+			}
+			rf.mu.Unlock()
+			if do_send {
+				rf.heartbeatMessage()
+			}
 		}
 	}()
 
 }
 
 func (rf *Raft) heartbeatMessage() {
+	DPrintf(rf.me, "send AE to followers")
 	rf.mu.Lock()
 	if rf.state != Leader {
 		rf.mu.Unlock()
@@ -562,11 +627,11 @@ func (rf *Raft) heartbeatMessage() {
 			nxt_idx := rf.nextIndex[idx]
 			entries := rf.logs[nxt_idx:]
 			save_commit_index := rf.commitIndex
-			rf.mu.Unlock()
 			prev_index := nxt_idx - 1
 			prev_term := rf.logs[prev_index].Term
+			rf.mu.Unlock()
 			args := AppendEntriesArgs{
-				LeaderTerm:   rf.currentTerm,
+				LeaderTerm:   start_term,
 				LeaderId:     rf.me,
 				Entries:      entries,
 				PrevLogIndex: prev_index,
@@ -574,15 +639,18 @@ func (rf *Raft) heartbeatMessage() {
 				LeaderCommit: save_commit_index,
 			}
 			reply := AppendEntriesReply{}
-			if rf.sendAppendEntries(idx, &args, &reply) {
+			if ok := rf.sendAppendEntries(idx, &args, &reply); ok {
+				rf.mu.Lock()
 				if rf.state != Leader {
+					rf.mu.Unlock()
 					return
 				}
 				if reply.ReplyTerm > start_term {
 					rf.convertFollower(reply.ReplyTerm)
+					rf.persist()
+					rf.mu.Unlock()
 					return
 				}
-				rf.mu.Lock()
 				if reply.ReplyTerm == start_term {
 					if reply.Success {
 						rf.nextIndex[idx] = nxt_idx + len(entries)
@@ -600,32 +668,45 @@ func (rf *Raft) heartbeatMessage() {
 						}
 						if rf.commitIndex > save_commit_index {
 							rf.commitCond.Signal()
+							// once leader commit this log entry, we send AE to followers
+							// we can't hold lock when sending message to channel, dead lock will occur!!
+							rf.mu.Unlock()
+							rf.sendTrigger <- struct{}{}
+							rf.mu.Lock()
 						}
-					}
-				} else {
-					// not optimized code
-					// rf.nextIndex[idx]--
-					if reply.Xterm == -1 && reply.XIndex == -1 {
-						// Xterm == -1 and XIndex == -1
-						rf.nextIndex[idx]--
-						EPrintf("decrease 1\n")
-					} else if reply.Xterm == -1 {
-						// Xterm == -1 and (XIndex == -1 or XIndex != -1)
-						EPrintf("decrease %v\n", rf.nextIndex[idx]-reply.XIndex)
-						rf.nextIndex[idx] = reply.XIndex
 					} else {
-						// Xterm != -1 and XIndex != -1
-						nxt_idx := 1
-						for i := 0; i < len(rf.logs); i++ {
-							if rf.logs[i].Term == reply.Xterm {
-								nxt_idx = i
-								break
+						// not optimized code
+						// rf.nextIndex[idx]--
+						// XTerm is the term of conflict log, XIndex is the index of conflict log
+						//
+						// 		|<--       XTerm       -->|
+						// 		^
+						// 		XIndex is the start index of log with XTerm
+						//
+						// if follower don't have XTerm, representing that follower's log is too short, leader should reduce its nextIndex in a unit of term
+						// if leader don't have XTerm, representing that the follower's log will be overwrite, leader should reduce its nextIndex in a unit of term
+						// if leader have XTerm, leader should find the first index of XTerm, representing that the follower have correct log term but log entry is incorrect
+						// in the case of this scenario, leader should send all logs with XTerm to follower
+						DPrintf(rf.me, "[XTerm, XIndex]: (%v, %v)", reply.XTerm, reply.XIndex)
+						if reply.XTerm != -1 {
+							nxt_idx = -1
+							for i := 1; i < len(rf.logs); i++ {
+								if rf.logs[i].Term == reply.XTerm {
+									nxt_idx = i
+									break
+								}
+								nxt_idx++
 							}
+							if nxt_idx != -1 {
+								rf.nextIndex[idx] = nxt_idx
+							} else {
+								rf.nextIndex[idx] = reply.XIndex
+							}
+						} else {
+							rf.nextIndex[idx] = reply.XIndex
 						}
-						EPrintf("decrease %v\n", rf.nextIndex[idx]-nxt_idx)
-						rf.nextIndex[idx] = nxt_idx
+						DPrintf(rf.me, "nextIndex[%v]: %v", idx, rf.nextIndex[idx])
 					}
-
 				}
 				rf.mu.Unlock()
 			}
@@ -634,18 +715,17 @@ func (rf *Raft) heartbeatMessage() {
 }
 
 func (rf *Raft) applyLog() {
-	for {
+	for !rf.killed() {
 		rf.mu.Lock()
-		for rf.lastApplied == rf.commitIndex {
+		for !(rf.lastApplied < rf.commitIndex) {
 			rf.commitCond.Wait()
 		}
 		DPrintf(rf.me, "[apply log] [lastApplied]: %v, [commitIndex]: %v", rf.lastApplied, rf.commitIndex)
-		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		for i := rf.lastApplied + 1; i <= rf.commitIndex && i < len(rf.logs); i++ {
 			rf.tester <- ApplyMsg{CommandValid: true, Command: rf.logs[i].Command, CommandIndex: i}
+			// the increase in lastApplied should simultaneously be acted
+			rf.lastApplied++
 			DPrintf(rf.me, "[apply log] [log]: %+v has applied, [apply idx]: %v", rf.logs[i], i)
-		}
-		if rf.commitIndex > rf.lastApplied {
-			rf.lastApplied = rf.commitIndex
 		}
 		rf.mu.Unlock()
 	}
@@ -679,6 +759,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		nextIndex:         make(map[int]int),
 		matchIndex:        make(map[int]int),
 		tester:            applyCh,
+		sendTrigger:       make(chan struct{}, 64),
+		batchTimestamp:    time.Now(),
+		logDebuger:        make(chan DebugMsg, 64),
 	}
 
 	for i := 0; i < rf.cnt; i++ {
@@ -694,6 +777,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.applyLog()
+	// go rf.WriteLog()
 
 	return rf
 }

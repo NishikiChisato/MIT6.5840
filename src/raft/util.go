@@ -44,7 +44,7 @@ func TRaftPrintAllLogs(cfg *config) {
 	log.SetFlags(log.Lmicroseconds)
 	for _, v := range cfg.rafts {
 		if All_Log {
-			log.Printf("%v\n", v)
+			log.Printf(colorCyan+"%v\n"+colorReset, v)
 			os.Stdout.Sync()
 		}
 	}
