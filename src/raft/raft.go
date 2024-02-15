@@ -22,6 +22,7 @@ import (
 
 	"bytes"
 	"math/rand"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -146,6 +147,11 @@ type Raft struct {
 
 	// persist
 	logDebuger chan DebugMsg
+
+	// log compaction
+	snapshot         []byte
+	lastIncludeIndex int
+	lastIncludeTerm  int
 }
 
 // return currentTerm and whether this server
@@ -301,6 +307,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf(rf.me, "[AE] [args]: %+v, [term]: %v", args, rf.currentTerm)
+	DPrintf(rf.me, "number of go routine: %v", runtime.NumGoroutine())
 	// if leader own higher term, no matter what state the server is, should convert to follower
 	if rf.currentTerm < args.LeaderTerm {
 		rf.convertFollower(args.LeaderTerm)
@@ -431,7 +438,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// once leader receives a new log entry, send AE to followers
 	// we can't hold lock when sending message to channel, dead lock will occur!!
-	if time.Since(save_batch_timestamp) > time.Millisecond*time.Duration(25) {
+	if time.Since(save_batch_timestamp) > time.Millisecond*time.Duration(50) {
 		rf.mu.Lock()
 		rf.batchTimestamp = time.Now()
 		rf.mu.Unlock()
@@ -520,8 +527,9 @@ func (rf *Raft) startElection() {
 				LastLogTerm:   last_term}
 
 			reply := RequestVoteReply{}
-
-			if ok := rf.sendRequestVote(idx, &args, &reply); ok {
+			// the reason for timeout is discussed below
+			save_time := time.Now()
+			if ok := rf.sendRequestVote(idx, &args, &reply); ok && time.Since(save_time) <= time.Millisecond*time.Duration(100) {
 				rf.mu.Lock()
 				// state may have changed by other startElection instance
 				// if we omit this judgement, the term may be decreased (start_term is 2, rf.currentTerm is 5 and reply.Reply_Term is 4)
@@ -639,7 +647,11 @@ func (rf *Raft) heartbeatMessage() {
 				LeaderCommit: save_commit_index,
 			}
 			reply := AppendEntriesReply{}
-			if ok := rf.sendAppendEntries(idx, &args, &reply); ok {
+			// because of network partition, rf.sendAppendEntries may not return for a long time
+			// in the case of scenario, go routine would never return, and leader would consistently create new go routine to send AE
+			// we stipulate thsi timeout cannot be over heartbeat timeout
+			save_time := time.Now()
+			if ok := rf.sendAppendEntries(idx, &args, &reply); ok && time.Since(save_time) <= time.Millisecond*time.Duration(100) {
 				rf.mu.Lock()
 				if rf.state != Leader {
 					rf.mu.Unlock()
