@@ -487,7 +487,7 @@ func (rf *Raft) ticker() {
 
 		if time.Since(rf.electionTimestamp) > time.Millisecond*time.Duration(election_timeout) {
 			DPrintf(rf.me, "[ticker] start election in term: %v", rf.currentTerm)
-			rf.startElection()
+			rf.startElection(election_timeout)
 			rf.mu.Unlock()
 			return
 		}
@@ -500,7 +500,7 @@ func (rf *Raft) ticker() {
 	}
 }
 
-func (rf *Raft) startElection() {
+func (rf *Raft) startElection(election_timeout int32) {
 	rf.state = Candidate
 	rf.voteFor = rf.me
 	rf.currentTerm++
@@ -527,9 +527,10 @@ func (rf *Raft) startElection() {
 				LastLogTerm:   last_term}
 
 			reply := RequestVoteReply{}
-			// the reason for timeout is discussed below
+			// due to network partition, this candidate may retain in the next term
+			// but RV rpc in current term should not be received in the next term
 			save_time := time.Now()
-			if ok := rf.sendRequestVote(idx, &args, &reply); ok && time.Since(save_time) <= time.Millisecond*time.Duration(100) {
+			if ok := rf.sendRequestVote(idx, &args, &reply); ok && time.Since(save_time) <= time.Millisecond*time.Duration(election_timeout) {
 				rf.mu.Lock()
 				// state may have changed by other startElection instance
 				// if we omit this judgement, the term may be decreased (start_term is 2, rf.currentTerm is 5 and reply.Reply_Term is 4)
@@ -647,9 +648,6 @@ func (rf *Raft) heartbeatMessage() {
 				LeaderCommit: save_commit_index,
 			}
 			reply := AppendEntriesReply{}
-			// because of network partition, rf.sendAppendEntries may not return for a long time
-			// in the case of scenario, go routine would never return, and leader would consistently create new go routine to send AE
-			// we stipulate thsi timeout cannot be over heartbeat timeout
 			save_time := time.Now()
 			if ok := rf.sendAppendEntries(idx, &args, &reply); ok && time.Since(save_time) <= time.Millisecond*time.Duration(100) {
 				rf.mu.Lock()
@@ -702,15 +700,14 @@ func (rf *Raft) heartbeatMessage() {
 						DPrintf(rf.me, "[XTerm, XIndex]: (%v, %v)", reply.XTerm, reply.XIndex)
 						if reply.XTerm != -1 {
 							nxt_idx = -1
-							for i := 1; i < len(rf.logs); i++ {
+							for i := len(rf.logs) - 1; i >= 1; i-- {
 								if rf.logs[i].Term == reply.XTerm {
 									nxt_idx = i
 									break
 								}
-								nxt_idx++
 							}
 							if nxt_idx != -1 {
-								rf.nextIndex[idx] = nxt_idx
+								rf.nextIndex[idx] = nxt_idx + 1
 							} else {
 								rf.nextIndex[idx] = reply.XIndex
 							}
