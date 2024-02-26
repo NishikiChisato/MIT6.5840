@@ -116,6 +116,7 @@ func (cfg *config) crash1(i int) {
 
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
+	Debug(dTest, "S%d crash", i)
 
 	// a fresh persister, in case old instance
 	// continues to update the Persister.
@@ -185,9 +186,9 @@ func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
 				err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.CommandIndex)
 			}
 			if err_msg != "" {
-				TRaftPrintAllLogs(cfg)
 				log.Fatalf("apply error: %v", err_msg)
 				cfg.applyErr[i] = err_msg
+				PrintAllLogsFromCFG(cfg)
 				// keep reading after error so that Raft doesn't block
 				// holding locks...
 			}
@@ -240,6 +241,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 			err_msg = cfg.ingestSnap(i, m.Snapshot, m.SnapshotIndex)
 			cfg.mu.Unlock()
 		} else if m.CommandValid {
+			CPrintf("[apply message]: %+v, cfg.lastApplied[%v]: %v", m, i, cfg.lastApplied[i])
 			if m.CommandIndex != cfg.lastApplied[i]+1 {
 				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandIndex)
 			}
@@ -275,6 +277,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 		if err_msg != "" {
 			log.Fatalf("apply error: %v", err_msg)
 			cfg.applyErr[i] = err_msg
+			PrintAllLogsFromCFG(cfg)
 			// keep reading after error so that Raft doesn't block
 			// holding locks...
 		}
@@ -287,6 +290,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 // state persister, to isolate previous instance of
 // this server. since we cannot really kill it.
 func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
+	Debug(dTest, "S%d restart", i)
 	cfg.crash1(i)
 
 	// a fresh set of outgoing ClientEnd names.
@@ -370,6 +374,7 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
+	Debug(dTest, "S%d connect", i)
 	// fmt.Printf("connect(%d)\n", i)
 
 	cfg.connected[i] = true
@@ -393,6 +398,7 @@ func (cfg *config) connect(i int) {
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
+	Debug(dTest, "S%d disconnect", i)
 	// fmt.Printf("disconnect(%d)\n", i)
 
 	cfg.connected[i] = false

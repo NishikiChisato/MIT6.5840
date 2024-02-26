@@ -22,7 +22,6 @@ import (
 
 	"bytes"
 	"math/rand"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -88,12 +87,16 @@ const (
 type LogType struct {
 	Command interface{}
 	Term    int
+	Index   int
 }
 
 type PersistType struct {
 	CurrentTerm int
 	VoteFor     int
 	Logs        []LogType
+	//snapshot should also be persisted
+	LastIncludedIndex int
+	LastIncludedTerm  int
 }
 
 func min(x, y int) int {
@@ -135,6 +138,7 @@ type Raft struct {
 	electionTimestamp time.Time   // timestamp for leader election
 
 	// log replicated
+	// index 0 either be empty log entry or log entry with lastIncludeIndex and lastIncludeTerm
 	logs           []LogType
 	lastApplied    int
 	commitIndex    int
@@ -146,6 +150,8 @@ type Raft struct {
 	batchTimestamp time.Time
 
 	// persist
+	// the object of persist not only currentTerm/voteFor/logs, but snapshot
+	// the former consists of rf.snapshot/rf.lastIncludeIndex/rf.lastIncludeTerm
 	logDebuger chan DebugMsg
 
 	// log compaction
@@ -186,7 +192,7 @@ func (rf *Raft) persist() {
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
 
-	DPrintf(rf.me, "persist state")
+	Debug(dPersist, "S%d %v persist state", rf.me, rf.state.String())
 	buf := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(buf)
 	var persist_storage PersistType
@@ -194,9 +200,12 @@ func (rf *Raft) persist() {
 	persist_storage.VoteFor = rf.voteFor
 	persist_storage.Logs = append(persist_storage.Logs, rf.logs[1:]...)
 
+	persist_storage.LastIncludedIndex = rf.lastIncludeIndex
+	persist_storage.LastIncludedTerm = rf.lastIncludeTerm
+
 	encoder.Encode(&persist_storage)
 	raft_state := buf.Bytes()
-	rf.persister.Save(raft_state, nil)
+	rf.persister.Save(raft_state, rf.snapshot)
 }
 
 // restore previously persisted state.
@@ -217,7 +226,7 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
-	DPrintf(rf.me, "recover from crash")
+	Debug(dPersist, "S%d %v recovery from persist", rf.me, rf.state.String())
 	buf := bytes.NewBuffer(data)
 	decoder := labgob.NewDecoder(buf)
 	var content PersistType
@@ -225,8 +234,11 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = content.CurrentTerm
 		rf.voteFor = content.VoteFor
 		rf.logs = append(rf.logs, content.Logs...)
+
+		rf.lastIncludeIndex = content.LastIncludedIndex
+		rf.lastIncludeTerm = content.LastIncludedTerm
 	} else {
-		DPrintf(rf.me, "restore from persist error")
+		Debug(dError, "S%d %v recovery from persist", rf.me, rf.state.String())
 	}
 }
 
@@ -253,8 +265,8 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Reply_Term int  // server's term
-	Vote_Grant bool // whether vote or not, true is vote
+	ReplyTerm int  // server's term
+	VoteGrant bool // whether vote or not, true is vote
 }
 
 // example RequestVote RPC handler.
@@ -263,7 +275,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf(rf.me, "[RV] [args]: %+v, [term, vote for]: (%v, %v), [logs]: %v", args, rf.currentTerm, rf.voteFor, rf.logs)
+	Debug(dVote, "S%d %v (term: %v, voteFor: %v, lastIndex: %v, lastTerm: %v) receive RV from %v, args is %+v",
+		rf.me, rf.state.String(), rf.currentTerm, rf.voteFor, len(rf.logs)-1, rf.logs[len(rf.logs)-1].Term, args.CandidateId, args)
 	if rf.currentTerm < args.CandidateTerm {
 		rf.convertFollower(args.CandidateTerm)
 		rf.persist()
@@ -271,18 +284,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// last_index should be len(rf.logs) - 1 instead of lastApplied
 	// suppose a scenario, a disconnected leader consistently receives request, its own log will grow simultaneously
 	// but the term in its log would not change!! the object of our comparision is term!!
-	last_index := len(rf.logs) - 1
-	last_term := rf.logs[last_index].Term
+	last_index := len(rf.logs)
+	last_term := rf.logs[last_index-1].Term
 	// if split vote occurs, followers hove no way to update its voteFor
 	// in case of this scenarios, follower eithor vote original candidate or wait for election timeout
 	if args.CandidateTerm == rf.currentTerm && (rf.voteFor == -1 || rf.voteFor == args.CandidateId) &&
 		(args.LastLogTerm > last_term || (args.LastLogTerm == last_term && args.LastLogIndex >= last_index)) {
 		rf.voteFor, rf.electionTimestamp = args.CandidateId, time.Now()
-		reply.Vote_Grant = true
+		reply.VoteGrant = true
+		Debug(dVote, "S%d -> S%d with since: %v", rf.me, args.CandidateId, time.Since(rf.electionTimestamp))
 	} else {
-		reply.Vote_Grant = false
+		reply.VoteGrant = false
 	}
-	reply.Reply_Term = rf.currentTerm
+	reply.ReplyTerm = rf.currentTerm
 }
 
 type AppendEntriesArgs struct {
@@ -306,8 +320,8 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf(rf.me, "[AE] [args]: %+v, [term]: %v", args, rf.currentTerm)
-	DPrintf(rf.me, "number of go routine: %v", runtime.NumGoroutine())
+	Debug(dLog, "S%d %v (term: %v) receive AE from %v(term: %v), log len: %v, prev log idx: %v, prev log term: %v, leader commit: %v",
+		rf.me, rf.state.String(), rf.currentTerm, args.LeaderId, args.LeaderTerm, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 	// if leader own higher term, no matter what state the server is, should convert to follower
 	if rf.currentTerm < args.LeaderTerm {
 		rf.convertFollower(args.LeaderTerm)
@@ -339,6 +353,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 
 		conflict_index, append_index := args.PrevLogIndex+1, 0
+		// conflict_index either is the end of logs or is the index where log entry is not matched with leader
+		// append_index either is the end of args.Entries or is the index where following entries will be appended into follower
 		for {
 			if conflict_index == len(rf.logs) || append_index == len(args.Entries) {
 				break
@@ -349,11 +365,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			conflict_index++
 			append_index++
 		}
-		// conflict_index either is the end of logs or is the index where log entry is not matched with leader
-		// append_index either is the end of args.Entries or is the index where following entries will be appended into follower
-		DPrintf(rf.me, "[AE] [before log]: %v, [args]: %+v", rf.logs, args)
-		rf.logs = append(rf.logs[:conflict_index], args.Entries[append_index:]...)
-		DPrintf(rf.me, "[AE] [after log]: %v", rf.logs)
+		if append_index < len(args.Entries) {
+			rf.logs = append(rf.logs[:conflict_index], args.Entries[append_index:]...)
+		}
+		Debug(dLog, "S%d %v log len is: %v, entries len is: %v, commitIndex is: %v", rf.me, rf.state.String(), len(rf.logs), len(args.Entries), rf.commitIndex)
 
 		rf.persist()
 
@@ -362,10 +377,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// the reason is leader always send logs from nextIndex to THE END to follower, and LeaderCommit must lower than and equal to leader's log len
 			// after follower replicates args.Entries, follower can own all logs from leader, so args.LeaderCommit must lower than and equal to len(rf.logs) - 1
 			// rf.commitIndex = int(math.Min(float64(len(rf.logs)), float64(args.LeaderCommit)))
-			rf.commitIndex = args.LeaderCommit
-			rf.commitCond.Signal()
+			rf.commitIndex = min(args.LeaderCommit, len(rf.logs))
+			rf.commitCond.Broadcast()
 		}
 		reply.Success = true
+		rf.electionTimestamp = time.Now()
 	}
 	reply.ReplyTerm = rf.currentTerm
 }
@@ -426,19 +442,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if !isLeader {
 		return 0, term, false
 	}
-	DPrintf(rf.me, "[Start] state: %v", rf.state.String())
 
 	rf.mu.Lock()
-	rf.logs = append(rf.logs, LogType{Command: command, Term: term})
+	new_log := LogType{Command: command, Term: term, Index: len(rf.logs)}
+	rf.logs = append(rf.logs, new_log)
 	rf.persist()
 	index := len(rf.logs) - 1
-	DPrintf(rf.me, "[Start] append log: %+v", rf.logs[len(rf.logs)-1])
+	Debug(dClient, "S%d %v receive a new log: %+v", rf.me, rf.state.String(), new_log)
 	save_batch_timestamp := rf.batchTimestamp
 	rf.mu.Unlock()
 
 	// once leader receives a new log entry, send AE to followers
 	// we can't hold lock when sending message to channel, dead lock will occur!!
-	if time.Since(save_batch_timestamp) > time.Millisecond*time.Duration(50) {
+	if time.Since(save_batch_timestamp) > time.Millisecond*time.Duration(10) {
 		rf.mu.Lock()
 		rf.batchTimestamp = time.Now()
 		rf.mu.Unlock()
@@ -467,7 +483,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	election_timeout := 150 + (rand.Int31() % 200)
+	election_timeout := 250 + (rand.Int31() % 400)
 	start_term := rf.currentTerm
 	for !rf.killed() {
 
@@ -486,18 +502,53 @@ func (rf *Raft) ticker() {
 		}
 
 		if time.Since(rf.electionTimestamp) > time.Millisecond*time.Duration(election_timeout) {
-			DPrintf(rf.me, "[ticker] start election in term: %v", rf.currentTerm)
+			Debug(dVote, "S%d %v start a new election in term %v with since: %v, election_timeout: %v",
+				rf.me, rf.state.String(), rf.currentTerm, time.Since(rf.electionTimestamp), time.Millisecond*time.Duration(election_timeout))
 			rf.startElection(election_timeout)
 			rf.mu.Unlock()
 			return
 		}
 		rf.mu.Unlock()
 
-		// pause for a random amount of time between 50 and 350
+		// pause for a random amount of time between 50 and 150
 		// milliseconds.
+		// ticker must lower than election timeout
 		ms := 50 + (rand.Int63() % 100)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
+}
+
+func (rf *Raft) retryRequestVote(obj, retry_cnt, retry_interval int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	ch := make(chan RequestVoteReply, retry_cnt)
+	fun := func(shutdown *atomic.Value) {
+		save_args := RequestVoteArgs{
+			CandidateTerm: args.CandidateTerm,
+			CandidateId:   args.CandidateId,
+			LastLogIndex:  args.LastLogIndex,
+			LastLogTerm:   args.LastLogTerm,
+		}
+		save_reply := RequestVoteReply{}
+		Debug(dVote, "S%d %v send RV(retry) to %v", rf.me, rf.state.String(), obj)
+		if ok := rf.sendRequestVote(obj, &save_args, &save_reply); ok && shutdown.Load() == false {
+			ch <- save_reply
+		}
+	}
+	for i := 0; i < retry_cnt; i++ {
+		var shutdown atomic.Value
+		shutdown.Store(false)
+		fun(&shutdown)
+		select {
+		case ret := <-ch:
+			Debug(dVote, "S%d %v retry to %v success", rf.me, rf.state.String(), obj)
+			reply.ReplyTerm = ret.ReplyTerm
+			reply.VoteGrant = ret.VoteGrant
+			return true
+		case <-time.After(time.Millisecond * time.Duration(retry_interval)):
+			shutdown.Store(true)
+			continue
+		}
+	}
+	return false
 }
 
 func (rf *Raft) startElection(election_timeout int32) {
@@ -517,8 +568,8 @@ func (rf *Raft) startElection(election_timeout int32) {
 		}
 		go func(idx int) {
 			rf.mu.Lock()
-			last_index := len(rf.logs) - 1
-			last_term := rf.logs[last_index].Term
+			last_index := len(rf.logs)
+			last_term := rf.logs[last_index-1].Term
 			rf.mu.Unlock()
 			args := RequestVoteArgs{
 				CandidateTerm: start_term,
@@ -527,35 +578,44 @@ func (rf *Raft) startElection(election_timeout int32) {
 				LastLogTerm:   last_term}
 
 			reply := RequestVoteReply{}
-			// due to network partition, this candidate may retain in the next term
-			// but RV rpc in current term should not be received in the next term
-			save_time := time.Now()
-			if ok := rf.sendRequestVote(idx, &args, &reply); ok && time.Since(save_time) <= time.Millisecond*time.Duration(election_timeout) {
-				rf.mu.Lock()
+
+			retry_cnt := 5
+			retry_interval := 50
+			Debug(dVote, "S%d %v send RV(first) to %v", rf.me, rf.state.String(), idx)
+			success := rf.sendRequestVote(idx, &args, &reply)
+			if !success {
+				success = rf.retryRequestVote(idx, retry_cnt, retry_interval, &args, &reply)
+			}
+			rf.mu.Lock()
+			if success {
 				// state may have changed by other startElection instance
-				// if we omit this judgement, the term may be decreased (start_term is 2, rf.currentTerm is 5 and reply.Reply_Term is 4)
-				if rf.state != Candidate {
+				// if we omit this judgement, the term may be decreased (start_term is 2, rf.currentTerm is 5 and reply.ReplyTerm is 4)
+				if rf.state != Candidate || time.Since(rf.electionTimestamp) >= time.Millisecond*time.Duration(election_timeout) {
 					rf.mu.Unlock()
 					return
 				}
-				if reply.Reply_Term > start_term {
-					rf.convertFollower(reply.Reply_Term)
+				if reply.ReplyTerm > start_term {
+					rf.convertFollower(reply.ReplyTerm)
 					rf.persist()
 					rf.mu.Unlock()
 					return
-				} else if reply.Reply_Term == start_term && reply.Vote_Grant {
+				} else if reply.ReplyTerm == start_term && reply.VoteGrant {
 					// only reply term match with start term, the following code can be executed
 					// because if current candidate becomes leader, all follower should have the same term
 					atomic.AddInt32(&vote, 1)
 					if val := atomic.LoadInt32(&vote); int(val) >= (rf.cnt+1)/2 {
-						DPrintf(rf.me, "[startElection] become leader with votes %v", val)
+						if rf.state == Leader {
+							rf.mu.Unlock()
+							return
+						}
+						Debug(dVote, "S%d %v become leader in term %v", rf.me, rf.state.String(), rf.currentTerm)
 						rf.startLeader()
 						rf.mu.Unlock()
 						return
 					}
 				}
-				rf.mu.Unlock()
 			}
+			rf.mu.Unlock()
 		}(i)
 	}
 	// if election failed, we should restart ticker to trigger new election
@@ -573,8 +633,9 @@ func (rf *Raft) convertFollower(new_term int) {
 func (rf *Raft) startLeader() {
 	rf.state = Leader
 	go func() {
+		Debug(dWarn, "S%d %v startleader with log len: %v", rf.me, rf.state, len(rf.logs))
 		rf.heartbeatMessage()
-		heartbeat_timeout := 100
+		heartbeat_timeout := 150
 		// timer represents one of two events
 		// - wait for 50ms
 		// - message from sendTrigger channel
@@ -618,14 +679,53 @@ func (rf *Raft) startLeader() {
 
 }
 
+func (rf *Raft) retryHeartbeatMessage(obj, retry_cnt, retry_interval int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ch := make(chan AppendEntriesReply, retry_cnt)
+	fun := func(shutdown *atomic.Value) {
+		save_args := AppendEntriesArgs{
+			LeaderTerm:   args.LeaderTerm,
+			LeaderId:     args.LeaderId,
+			PrevLogIndex: args.PrevLogIndex,
+			PrevLogTerm:  args.PrevLogTerm,
+			LeaderCommit: args.LeaderCommit,
+		}
+		save_args.Entries = make([]LogType, len(args.Entries))
+		copy(save_args.Entries, args.Entries)
+		save_reply := AppendEntriesReply{}
+		if ok := rf.sendAppendEntries(obj, &save_args, &save_reply); ok && shutdown.Load() == false {
+			ch <- save_reply
+		}
+	}
+	for i := 0; i < retry_cnt; i++ {
+		var shutdown atomic.Value
+		shutdown.Store(false)
+		fun(&shutdown)
+		select {
+		case ret := <-ch:
+			reply.ReplyTerm = ret.ReplyTerm
+			reply.Success = ret.Success
+			reply.XIndex = ret.XIndex
+			reply.XTerm = ret.XTerm
+			return true
+		case <-time.After(time.Millisecond * time.Duration(retry_interval)):
+			shutdown.Store(true)
+			continue
+		}
+	}
+	return false
+}
+
 func (rf *Raft) heartbeatMessage() {
-	DPrintf(rf.me, "send AE to followers")
 	rf.mu.Lock()
 	if rf.state != Leader {
 		rf.mu.Unlock()
 		return
 	}
 	start_term := rf.currentTerm
+	// once heartbeatMessage was called, rf.cnt - 1 goroutine will be created, and will send rf.cnt - 1 times into rf.sendTrigger
+	// as long as rf.sendTrigger has content, heartbeatMessage will be called, and more and more goroutine will be create
+	// one heartbeatMessage should match once rf.sendTrigger
+	trigger_cnt := int32(0)
 	rf.mu.Unlock()
 	for i := 0; i < rf.cnt; i++ {
 		if i == rf.me {
@@ -634,7 +734,18 @@ func (rf *Raft) heartbeatMessage() {
 		go func(idx int) {
 			rf.mu.Lock()
 			nxt_idx := rf.nextIndex[idx]
-			entries := rf.logs[nxt_idx:]
+			// equal is not allowed!! we should send heartbeat message with empty entries
+			if nxt_idx > len(rf.logs) {
+				// during normal execution, this scenario wasn't occurred
+				// suppose rf.nextIndex[1] = 15, len(rf.logs) = 20, and log len of server 1 is 15
+				// we also suppose current leader's logs are not applied)
+				// at some time, current leader step down(due to a higher term), and after a while, it's elected a leader again
+				// during this interval, current leader's log may be truncated by another leader, so its log len is lower than rf.nextIndex[1]
+				rf.mu.Unlock()
+				return
+			}
+			entries := make([]LogType, len(rf.logs[nxt_idx:]))
+			copy(entries, rf.logs[nxt_idx:])
 			save_commit_index := rf.commitIndex
 			prev_index := nxt_idx - 1
 			prev_term := rf.logs[prev_index].Term
@@ -648,9 +759,16 @@ func (rf *Raft) heartbeatMessage() {
 				LeaderCommit: save_commit_index,
 			}
 			reply := AppendEntriesReply{}
-			save_time := time.Now()
-			if ok := rf.sendAppendEntries(idx, &args, &reply); ok && time.Since(save_time) <= time.Millisecond*time.Duration(100) {
-				rf.mu.Lock()
+			retry_cnt := 5
+			retry_interval := 30
+			Debug(dLeader, "S%d %v send AE(first) to %v, log len: %v, prev log idx: %v, prev log term: %v, leader commit: %v",
+				rf.me, rf.state.String(), idx, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
+			success := rf.sendAppendEntries(idx, &args, &reply)
+			if !success {
+				success = rf.retryHeartbeatMessage(idx, retry_cnt, retry_interval, &args, &reply)
+			}
+			rf.mu.Lock()
+			if success {
 				if rf.state != Leader {
 					rf.mu.Unlock()
 					return
@@ -660,8 +778,7 @@ func (rf *Raft) heartbeatMessage() {
 					rf.persist()
 					rf.mu.Unlock()
 					return
-				}
-				if reply.ReplyTerm == start_term {
+				} else if reply.ReplyTerm == start_term {
 					if reply.Success {
 						rf.nextIndex[idx] = nxt_idx + len(entries)
 						rf.matchIndex[idx] = rf.nextIndex[idx] - 1
@@ -676,13 +793,14 @@ func (rf *Raft) heartbeatMessage() {
 								}
 							}
 						}
-						if rf.commitIndex > save_commit_index {
-							rf.commitCond.Signal()
+						if rf.commitIndex > save_commit_index && atomic.LoadInt32(&trigger_cnt) < 1 {
+							rf.commitCond.Broadcast()
 							// once leader commit this log entry, we send AE to followers
 							// we can't hold lock when sending message to channel, dead lock will occur!!
 							rf.mu.Unlock()
 							rf.sendTrigger <- struct{}{}
 							rf.mu.Lock()
+							atomic.AddInt32(&trigger_cnt, 1)
 						}
 					} else {
 						// not optimized code
@@ -697,7 +815,6 @@ func (rf *Raft) heartbeatMessage() {
 						// if leader don't have XTerm, representing that the follower's log will be overwrite, leader should reduce its nextIndex in a unit of term
 						// if leader have XTerm, leader should find the first index of XTerm, representing that the follower have correct log term but log entry is incorrect
 						// in the case of this scenario, leader should send all logs with XTerm to follower
-						DPrintf(rf.me, "[XTerm, XIndex]: (%v, %v)", reply.XTerm, reply.XIndex)
 						if reply.XTerm != -1 {
 							nxt_idx = -1
 							for i := len(rf.logs) - 1; i >= 1; i-- {
@@ -714,11 +831,10 @@ func (rf *Raft) heartbeatMessage() {
 						} else {
 							rf.nextIndex[idx] = reply.XIndex
 						}
-						DPrintf(rf.me, "nextIndex[%v]: %v", idx, rf.nextIndex[idx])
 					}
 				}
-				rf.mu.Unlock()
 			}
+			rf.mu.Unlock()
 		}(i)
 	}
 }
@@ -729,14 +845,32 @@ func (rf *Raft) applyLog() {
 		for !(rf.lastApplied < rf.commitIndex) {
 			rf.commitCond.Wait()
 		}
-		DPrintf(rf.me, "[apply log] [lastApplied]: %v, [commitIndex]: %v", rf.lastApplied, rf.commitIndex)
-		for i := rf.lastApplied + 1; i <= rf.commitIndex && i < len(rf.logs); i++ {
-			rf.tester <- ApplyMsg{CommandValid: true, Command: rf.logs[i].Command, CommandIndex: i}
-			// the increase in lastApplied should simultaneously be acted
-			rf.lastApplied++
-			DPrintf(rf.me, "[apply log] [log]: %+v has applied, [apply idx]: %v", rf.logs[i], i)
+		start_lastApplied := rf.lastApplied
+		start_commitIndex := rf.commitIndex
+		start_state := rf.state
+		entries := make([]LogType, len(rf.logs[rf.lastApplied+1:rf.commitIndex+1]))
+		copy(entries, rf.logs[rf.lastApplied+1:rf.commitIndex+1])
+		can_apply := false
+		if start_state == Leader {
+			for i := len(rf.logs) - 1; i >= 1; i-- {
+				if rf.logs[i].Term == rf.currentTerm && i <= rf.commitIndex {
+					can_apply = true
+					break
+				}
+			}
 		}
 		rf.mu.Unlock()
+		if start_state != Leader || (start_state == Leader && can_apply) {
+			rf.mu.Lock()
+			rf.lastApplied = start_commitIndex
+			rf.mu.Unlock()
+			for i, log := range entries {
+				msg := ApplyMsg{CommandValid: true, Command: log.Command, CommandIndex: start_lastApplied + i + 1}
+				// rf.logDebuger <- DebugMsg{apply: msg, msg: rf.state.String()}
+				Debug(dCommit, "S%d %v commit log: %+v at index: %v, start_lastApplied: %v", rf.me, rf.state.String(), log, start_lastApplied+i+1, start_lastApplied)
+				rf.tester <- msg
+			}
+		}
 	}
 }
 
@@ -768,9 +902,12 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		nextIndex:         make(map[int]int),
 		matchIndex:        make(map[int]int),
 		tester:            applyCh,
-		sendTrigger:       make(chan struct{}, 64),
+		sendTrigger:       make(chan struct{}, 1024),
 		batchTimestamp:    time.Now(),
-		logDebuger:        make(chan DebugMsg, 64),
+		logDebuger:        make(chan DebugMsg, 1024),
+		snapshot:          nil,
+		lastIncludeIndex:  0,
+		lastIncludeTerm:   0,
 	}
 
 	for i := 0; i < rf.cnt; i++ {
@@ -786,7 +923,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.applyLog()
-	// go rf.WriteLog()
+	go rf.WriteLog()
 
 	return rf
 }

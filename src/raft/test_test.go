@@ -492,12 +492,9 @@ func TestRejoin2B(t *testing.T) {
 	cfg.disconnect(leader2)
 
 	TPrintf("[leader 2]: %v\n", leader2)
-	TRaftPrintAllLogs(cfg)
 
 	// old leader connected again
 	cfg.connect(leader1)
-
-	TRaftPrintAllLogs(cfg)
 
 	cfg.one(104, 2, true)
 
@@ -729,7 +726,6 @@ func TestPersist12C(t *testing.T) {
 
 	TPrintf("[11]\n")
 
-	TRaftPrintAllLogs(cfg)
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
 		cfg.start1(i, cfg.applier)
@@ -739,7 +735,6 @@ func TestPersist12C(t *testing.T) {
 		cfg.connect(i)
 	}
 	TPrintf(colorRed + "[after clush]\n" + colorReset)
-	TRaftPrintAllLogs(cfg)
 
 	cfg.one(12, servers, true)
 
@@ -852,7 +847,6 @@ func TestPersist32C(t *testing.T) {
 	cfg.one(101, 3, true)
 
 	TPrintf("first request\n")
-	TRaftPrintAllLogs(cfg)
 	leader := cfg.checkOneLeader()
 
 	TPrintf("[leader 1]: %v\n", leader)
@@ -862,7 +856,6 @@ func TestPersist32C(t *testing.T) {
 
 	cfg.one(102, 2, true)
 	TPrintf("second request\n")
-	TRaftPrintAllLogs(cfg)
 
 	cfg.crash1((leader + 0) % servers)
 	cfg.crash1((leader + 1) % servers)
@@ -872,18 +865,15 @@ func TestPersist32C(t *testing.T) {
 	cfg.connect((leader + 2) % servers)
 
 	TPrintf("connect follower 3\n")
-	TRaftPrintAllLogs(cfg)
 
 	cfg.start1((leader+0)%servers, cfg.applier)
 	cfg.connect((leader + 0) % servers)
 
 	TPrintf("restart leader 1\n")
 	TPrintf("connect leader 1\n")
-	TRaftPrintAllLogs(cfg)
 
 	cfg.one(103, 2, true)
 	TPrintf("third request\n")
-	TRaftPrintAllLogs(cfg)
 
 	cfg.start1((leader+1)%servers, cfg.applier)
 
@@ -962,7 +952,6 @@ func TestFigure82C(t *testing.T) {
 		}
 	}
 	TPrintf("finial request\n")
-	TRaftPrintAllLogs(cfg)
 
 	cfg.one(rand.Int(), servers, true)
 
@@ -1010,7 +999,6 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	cfg.one(rand.Int()%10000, 1, true)
 
 	TPrintf("first request\n")
-	TRaftPrintAllLogs(cfg)
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
@@ -1234,11 +1222,15 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			victim = leader1
 		}
 
+		TPrintf("[iter]: %v, [victim]: %v, [sender]: %v\n", i, victim, sender)
+
 		if disconnect {
+			TPrintf("[disconnect]: %v", victim)
 			cfg.disconnect(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 		if crash {
+			TPrintf("[crash]: %v", victim)
 			cfg.crash1(victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
@@ -1254,8 +1246,10 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			// make sure all followers have caught up, so that
 			// an InstallSnapshot RPC isn't required for
 			// TestSnapshotBasic2D().
+			TPrintf("disconnect && crash")
 			cfg.one(rand.Int(), servers, true)
 		} else {
+			TPrintf("!(disconnect && crash)")
 			cfg.one(rand.Int(), servers-1, true)
 		}
 
@@ -1265,11 +1259,13 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		if disconnect {
 			// reconnect a follower, who maybe behind and
 			// needs to rceive a snapshot to catch up.
+			TPrintf("[connect]: %v", victim)
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
 		}
 		if crash {
+			TPrintf("[recover]: %v", victim)
 			cfg.start1(victim, cfg.applierSnap)
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
