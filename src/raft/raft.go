@@ -256,21 +256,23 @@ func (rf *Raft) localIndex2GlobalIndex(idx, lastIncludedIndex int) int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	rf.mu.Lock()
-	if index <= rf.lastIncludeIndex || index > rf.localIndex2GlobalIndex(rf.commitIndex, rf.lastIncludeIndex) {
+	go func() {
+		rf.mu.Lock()
+		if index <= rf.lastIncludeIndex || index > rf.localIndex2GlobalIndex(rf.commitIndex, rf.lastIncludeIndex) {
+			rf.mu.Unlock()
+			return
+		}
+		Debug(dClient, "S%d %s receive snapshot request at %v", rf.me, rf.state.String(), index)
+
+		rf.logs[0] = rf.logs[rf.globalIndex2LocalIndex(index, rf.lastIncludeIndex)]
+		rf.logs = append(rf.logs[:1], rf.logs[rf.globalIndex2LocalIndex(index, rf.lastIncludeIndex)+1:]...)
+		rf.lastIncludeIndex = index
+		rf.lastIncludeTerm = rf.logs[0].Term
+
+		rf.persist()
+		rf.snapshot = snapshot
 		rf.mu.Unlock()
-		return
-	}
-	Debug(dClient, "S%d %s receive snapshot request at %v", rf.me, rf.state.String(), index)
-
-	rf.logs[0] = rf.logs[rf.globalIndex2LocalIndex(index, rf.lastIncludeIndex)]
-	rf.logs = append(rf.logs[:1], rf.logs[rf.globalIndex2LocalIndex(index, rf.lastIncludeIndex)+1:]...)
-	rf.lastIncludeIndex = index
-	rf.lastIncludeTerm = rf.logs[0].Term
-
-	rf.persist()
-	rf.snapshot = snapshot
-	rf.mu.Unlock()
+	}()
 }
 
 type InstallSnapshotArgs struct {
@@ -287,8 +289,8 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	Debug(dLog, "S%d %v(term: %v) receive IS from %v, LII: %v, LIT: %v",
-		rf.me, rf.state.String(), rf.currentTerm, args.LeaderId, rf.lastIncludeIndex, rf.lastIncludeTerm)
+	Debug(dLog, "S%d %v(term: %v, LII: %v, LIT: %v, LA: %v) receive IS from %v, LII: %v, LIT: %v",
+		rf.me, rf.state.String(), rf.currentTerm, rf.lastIncludeIndex, rf.lastIncludeTerm, rf.lastApplied, args.LeaderId, args.LastIncludeIndex, args.LastIncludeTerm)
 	if args.LeaderTerm < rf.currentTerm {
 		rf.mu.Unlock()
 		return
@@ -298,6 +300,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.persist()
 	}
 	rf.electionTimestamp = time.Now()
+	reply.ReplyTerm = rf.currentTerm
 	if args.LeaderTerm == rf.currentTerm && args.LastIncludeIndex > rf.lastIncludeIndex {
 		truncate_index := 0
 		for {
@@ -311,8 +314,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.snapshot = args.Data
 		rf.lastIncludeIndex = args.LastIncludeIndex
 		rf.lastIncludeTerm = args.LastIncludeTerm
-		rf.lastApplied = max(rf.lastApplied, args.LastIncludeIndex)
-		rf.commitIndex = max(rf.commitIndex, args.LastIncludeIndex)
+		rf.lastApplied = args.LastIncludeIndex
+		rf.commitIndex = min(max(rf.commitIndex, args.LastIncludeIndex), rf.localIndex2GlobalIndex(len(rf.logs), rf.lastIncludeIndex))
 
 		if len(rf.logs) == 0 {
 			rf.logs = append(rf.logs, LogType{Command: nil, Term: rf.lastIncludeTerm, Index: rf.lastIncludeIndex})
@@ -321,14 +324,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		save_snapshot := rf.snapshot
 		save_last_include_index := rf.lastIncludeIndex
 		save_last_include_term := rf.lastIncludeTerm
-		rf.mu.Unlock()
+		Debug(dLog, "S%d %v got snapshot at index: %v, LII: %v, LIT: %v, LA: %v, CI: %v",
+			rf.me, rf.state.String(), rf.lastIncludeIndex, rf.lastIncludeIndex, rf.lastIncludeTerm, rf.lastApplied, rf.commitIndex)
 		rf.tester <- ApplyMsg{SnapshotValid: true, Snapshot: save_snapshot, SnapshotIndex: save_last_include_index, SnapshotTerm: save_last_include_term}
-		rf.mu.Lock()
-		Debug(dLog, "S%d %v got snapshot at index: %v", rf.me, rf.state.String(), rf.lastIncludeIndex)
+		rf.mu.Unlock()
+		return
 	}
-	reply.ReplyTerm = rf.currentTerm
 	rf.mu.Unlock()
-
 }
 
 // example RequestVote RPC arguments structure.
@@ -455,7 +457,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if append_index < len(args.Entries) {
 			rf.logs = append(rf.logs[:conflict_index], args.Entries[append_index:]...)
 		}
-		Debug(dLog, "S%d %v log len is: %v, entries len is: %v, CI: %v", rf.me, rf.state.String(), len(rf.logs), len(args.Entries), rf.commitIndex)
+		Debug(dLog, "S%d %v log len is: %v, entries len is: %v, CI: %v, LA: %v",
+			rf.me, rf.state.String(), len(rf.logs), len(args.Entries), rf.commitIndex, rf.lastApplied)
 
 		rf.persist()
 
@@ -951,6 +954,7 @@ func (rf *Raft) heartbeatMessage() {
 					rf.mu.Unlock()
 					return
 				}
+				Debug(dLeader, "S%d %v receives AE reply from %v with success: %v", rf.me, rf.state.String(), idx, reply.Success)
 				if reply.ReplyTerm > start_term {
 					rf.convertFollower(reply.ReplyTerm)
 					rf.persist()
@@ -1023,14 +1027,15 @@ func (rf *Raft) applyLog() {
 		for !(rf.lastApplied < rf.commitIndex) {
 			rf.commitCond.Wait()
 		}
-		start_lastApplied := max(rf.lastApplied, rf.lastIncludeIndex)
-		start_commitIndex := rf.commitIndex
-		start_state := rf.state
-		start_last_include_index := rf.lastIncludeIndex
-		entries := make([]LogType, len(rf.logs[rf.globalIndex2LocalIndex(start_lastApplied+1, start_last_include_index):rf.globalIndex2LocalIndex(start_commitIndex+1, start_last_include_index)]))
-		copy(entries, rf.logs[rf.globalIndex2LocalIndex(start_lastApplied+1, start_last_include_index):rf.globalIndex2LocalIndex(start_commitIndex+1, start_last_include_index)])
+		start_lastApplied := rf.lastApplied
+		if rf.globalIndex2LocalIndex(start_lastApplied+1, rf.lastIncludeIndex) < 0 || rf.globalIndex2LocalIndex(rf.commitIndex+1, rf.lastIncludeIndex) > len(rf.logs) {
+			start_lastApplied = rf.lastIncludeIndex
+		}
+		entries := make([]LogType, len(rf.logs[rf.globalIndex2LocalIndex(start_lastApplied+1, rf.lastIncludeIndex):rf.globalIndex2LocalIndex(rf.commitIndex+1, rf.lastIncludeIndex)]))
+		copy(entries, rf.logs[rf.globalIndex2LocalIndex(start_lastApplied+1, rf.lastIncludeIndex):rf.globalIndex2LocalIndex(rf.commitIndex+1, rf.lastIncludeIndex)])
 		can_apply := false
-		if start_state == Leader {
+
+		if rf.state == Leader {
 			for i := len(rf.logs) - 1; i >= 1; i-- {
 				if rf.logs[i].Term == rf.currentTerm && i <= rf.commitIndex {
 					can_apply = true
@@ -1038,18 +1043,19 @@ func (rf *Raft) applyLog() {
 				}
 			}
 		}
-		rf.mu.Unlock()
-		if start_state != Leader || (start_state == Leader && can_apply) {
-			rf.mu.Lock()
-			rf.lastApplied = start_commitIndex
-			rf.mu.Unlock()
+
+		if rf.state != Leader || (rf.state == Leader && can_apply) {
+			Debug(dCommit, "S%d %v LA updates from %v to %v", rf.me, rf.state.String(), rf.lastApplied, rf.commitIndex)
+			rf.lastApplied = rf.commitIndex
 			for i, log := range entries {
 				msg := ApplyMsg{CommandValid: true, Command: log.Command, CommandIndex: start_lastApplied + i + 1}
 				rf.logDebuger <- DebugMsg{apply: msg, msg: rf.state.String()}
 				Debug(dCommit, "S%d %v commit log: %+v at index: %v, start_lastApplied: %v", rf.me, rf.state.String(), log, start_lastApplied+i+1, start_lastApplied)
+
 				rf.tester <- msg
 			}
 		}
+		rf.mu.Unlock()
 	}
 }
 
