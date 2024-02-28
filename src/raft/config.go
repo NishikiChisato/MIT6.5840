@@ -213,6 +213,7 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 	}
 	if index != -1 && index != lastIncludedIndex {
 		err := fmt.Sprintf("server %v snapshot doesn't match m.SnapshotIndex", i)
+		Debug(dError, "S%d snapshot with index: %v doesn't match index: %v", i, lastIncludedIndex, index)
 		return err
 	}
 	cfg.logs[i] = map[int]interface{}{}
@@ -241,7 +242,6 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 			err_msg = cfg.ingestSnap(i, m.Snapshot, m.SnapshotIndex)
 			cfg.mu.Unlock()
 		} else if m.CommandValid {
-			CPrintf("[apply message]: %+v, cfg.lastApplied[%v]: %v", m, i, cfg.lastApplied[i])
 			if m.CommandIndex != cfg.lastApplied[i]+1 {
 				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandIndex)
 			}
