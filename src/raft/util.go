@@ -30,7 +30,7 @@ const (
 )
 
 // Debugging
-var debug int = 1
+var debug int = 0
 var DDebug bool = true
 var TDebug bool = false
 var CDebug bool = true

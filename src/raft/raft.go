@@ -198,7 +198,7 @@ func (rf *Raft) persist() {
 	var persist_storage PersistType
 	persist_storage.CurrentTerm = rf.currentTerm
 	persist_storage.VoteFor = rf.voteFor
-	persist_storage.Logs = append(persist_storage.Logs, rf.logs[1:]...)
+	persist_storage.Logs = append(persist_storage.Logs, rf.logs[0:]...)
 
 	persist_storage.LastIncludedIndex = rf.lastIncludeIndex
 	persist_storage.LastIncludedTerm = rf.lastIncludeTerm
@@ -233,13 +233,24 @@ func (rf *Raft) readPersist(data []byte) {
 	if decoder.Decode(&content) == nil {
 		rf.currentTerm = content.CurrentTerm
 		rf.voteFor = content.VoteFor
-		rf.logs = append(rf.logs, content.Logs...)
+		// rf.logs = append(rf.logs, content.Logs...)
+		rf.logs = make([]LogType, len(content.Logs))
+		copy(rf.logs, content.Logs)
 
 		rf.lastIncludeIndex = content.LastIncludedIndex
 		rf.lastIncludeTerm = content.LastIncludedTerm
+
+		Debug(dPersist, "S%d %v after persist, log is: %+v", rf.me, rf.state.String(), rf.logs)
 	} else {
-		Debug(dError, "S%d %v recovery from persist", rf.me, rf.state.String())
+		Debug(dError, "S%d %v recovery raft state from persist Fatal", rf.me, rf.state.String())
 	}
+}
+
+func (rf *Raft) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+	rf.snapshot = data
 }
 
 func (rf *Raft) globalIndex2LocalIndex(idx, lastIncludedIndex int) int {
@@ -257,8 +268,10 @@ func (rf *Raft) localIndex2GlobalIndex(idx, lastIncludedIndex int) int {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	go func() {
+		// Snapshot must asynchronous return due to deadlock, caused by synchronous return
 		rf.mu.Lock()
-		if index <= rf.lastIncludeIndex || index > rf.localIndex2GlobalIndex(rf.commitIndex, rf.lastIncludeIndex) {
+		if index <= rf.lastIncludeIndex || index > rf.commitIndex || index > rf.lastApplied {
+			// no matter current server is leader or follower, the interval of snapshot ranges from rf.lastIncludeIndex + 1(included) to rf.lastApplied(included)
 			rf.mu.Unlock()
 			return
 		}
@@ -269,8 +282,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.lastIncludeIndex = index
 		rf.lastIncludeTerm = rf.logs[0].Term
 
-		rf.persist()
 		rf.snapshot = snapshot
+		rf.persist()
 		rf.mu.Unlock()
 	}()
 }
@@ -317,16 +330,15 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.lastApplied = args.LastIncludeIndex
 		rf.commitIndex = min(max(rf.commitIndex, args.LastIncludeIndex), rf.localIndex2GlobalIndex(len(rf.logs), rf.lastIncludeIndex))
 
+		rf.persist()
+
 		if len(rf.logs) == 0 {
 			rf.logs = append(rf.logs, LogType{Command: nil, Term: rf.lastIncludeTerm, Index: rf.lastIncludeIndex})
 		}
 
-		save_snapshot := rf.snapshot
-		save_last_include_index := rf.lastIncludeIndex
-		save_last_include_term := rf.lastIncludeTerm
-		Debug(dLog, "S%d %v got snapshot at index: %v, LII: %v, LIT: %v, LA: %v, CI: %v",
+		Debug(dCommit, "S%d %v apply snapshot at index: %v, LII: %v, LIT: %v, LA: %v, CI: %v",
 			rf.me, rf.state.String(), rf.lastIncludeIndex, rf.lastIncludeIndex, rf.lastIncludeTerm, rf.lastApplied, rf.commitIndex)
-		rf.tester <- ApplyMsg{SnapshotValid: true, Snapshot: save_snapshot, SnapshotIndex: save_last_include_index, SnapshotTerm: save_last_include_term}
+		rf.tester <- ApplyMsg{SnapshotValid: true, Snapshot: rf.snapshot, SnapshotIndex: rf.lastIncludeIndex, SnapshotTerm: rf.lastIncludeTerm}
 		rf.mu.Unlock()
 		return
 	}
@@ -402,9 +414,9 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	Debug(dLog, "S%d %v (T: %v) receive AE from %v(T: %v), log len: %v, PLI: %v, PLT: %v, LC: %v, LII: %v, LIT: %v, log: %+v",
-		rf.me, rf.state.String(), rf.currentTerm, args.LeaderId, args.LeaderTerm, len(args.Entries),
-		args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, rf.lastIncludeIndex, rf.lastIncludeTerm, rf.logs)
+	Debug(dLog, "S%d %v (T: %v, LII: %v, LIT: %v, log: %+v) receive AE from %v(T: %v, PLI: %v, PLT: %v, LC: %v)",
+		rf.me, rf.state.String(), rf.currentTerm, rf.lastIncludeIndex, rf.lastIncludeTerm, rf.logs,
+		args.LeaderId, args.LeaderTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 	// if leader own higher term, no matter what state the server is, should convert to follower
 	if rf.currentTerm < args.LeaderTerm {
 		rf.convertFollower(args.LeaderTerm)
@@ -1045,7 +1057,7 @@ func (rf *Raft) applyLog() {
 		}
 
 		if rf.state != Leader || (rf.state == Leader && can_apply) {
-			Debug(dCommit, "S%d %v LA updates from %v to %v", rf.me, rf.state.String(), rf.lastApplied, rf.commitIndex)
+			Debug(dCommit, "S%d %v LA updates from %v to %v, entries: %+v", rf.me, rf.state.String(), rf.lastApplied, rf.commitIndex, entries)
 			rf.lastApplied = rf.commitIndex
 			for i, log := range entries {
 				msg := ApplyMsg{CommandValid: true, Command: log.Command, CommandIndex: start_lastApplied + i + 1}
@@ -1099,6 +1111,10 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.readSnapshot(persister.ReadSnapshot())
+
+	rf.lastApplied = rf.lastIncludeIndex
+	rf.commitIndex = rf.lastIncludeIndex
 
 	for i := 0; i < rf.cnt; i++ {
 		rf.nextIndex[i] = rf.lastIncludeIndex + 1
