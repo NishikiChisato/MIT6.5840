@@ -19,7 +19,7 @@
 
 ## Illustration
 
-Complete accuracy of code cannot be guaranteed due to the randomness of execution. Basically, we can pass from 2A to 2D over 200 times, and there are no failed tests occurred.
+Complete accuracy of code cannot be guaranteed due to the randomness of execution. Basically, we have passed test cases from 2A to 2D over 500 times, and there are no failed tests occurred.
 
 ## Test
 
@@ -44,6 +44,6 @@ Also bear in mind that change these file mods to executable. [`dslogs.py`](https
 
 The variable `debug` in [`util.go`](./src/raft/util.go) controls whether or not logs are output. You can input `dslogs --help` or `dstest --help` to get ideas of how to use it.
 
-In [`auxiliary.go`](./src/raft/auxiliary.go), `WriteLog` can be used to examine which logs have been applied for different servers. If you want to use it, please uncomment `logDebuger` in [`raft.go`](./src/raft/raft.go)
+In [`auxiliary.go`](./src/raft/auxiliary.go), The function `WriteLog` can be used to examine which logs have been applied for different servers. If you want to use it, please uncomment `logDebuger` in [`raft.go`](./src/raft/raft.go)
 
 
