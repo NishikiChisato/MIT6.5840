@@ -305,7 +305,7 @@ for !rf.killed() {
 
 那么剩下的问题是，重传的次数、时间间隔该如何定，以及我们是否需要等待所有的重传 `RPC` 全部返回
 
-我们以 `AE` 的重传进行说明。由于 `leader` 会单独开多个线程来发送 `AE`，因此重传的次数和时间间隔在我看来并没有严格的限制，我定下的重传次数为 `10`，重传间隔为 `30ms`
+我们以 `AE` 的重传进行说明。由于 `leader` 会单独开多个线程来发送 `AE`，因此重传的次数和时间间隔在我看来并没有严格的限制，我定下的重传次数为 `5`，重传间隔为 `30ms`
 
 下一个问题是，我们是否需要等待所有的重传 `RPC` 的返回。在我看来这个也不需要，`leader` 发送 `AE` 是为了保证 `follower` 不会擅自重启一轮 `election`，因此在这个意义下，`leader` 期望的是 `follower` 收到 `AE` 并重置 `election timeout`，至于日志的添加，可以交由下一次的 `AE` 处理，毕竟我们实现了 `AE` 的幂等性，多次收到同一个或者乱序收到并不会造成问题
 
@@ -402,8 +402,6 @@ rf.commitIndex = min(min(conflict_index+len(args.Entries[append_index:])-1, args
 在这里，`conflict_index` 和 `append_index` 分别表示 `rf.logs` 与 `args.Entries` 冲突的下标
 
 或许还有另外一种办法是限制一次提交日志的数量，但我并没有实现这个，所以不在此处讨论
-
-
 
 
 
