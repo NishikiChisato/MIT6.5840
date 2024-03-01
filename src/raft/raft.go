@@ -330,11 +330,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.lastApplied = args.LastIncludeIndex
 		rf.commitIndex = min(max(rf.commitIndex, args.LastIncludeIndex), rf.localIndex2GlobalIndex(len(rf.logs), rf.lastIncludeIndex))
 
-		rf.persist()
-
 		if len(rf.logs) == 0 {
 			rf.logs = append(rf.logs, LogType{Command: nil, Term: rf.lastIncludeTerm, Index: rf.lastIncludeIndex})
 		}
+
+		rf.persist()
 
 		Debug(dCommit, "S%d %v apply snapshot at index: %v, LII: %v, LIT: %v, LA: %v, CI: %v",
 			rf.me, rf.state.String(), rf.lastIncludeIndex, rf.lastIncludeIndex, rf.lastIncludeTerm, rf.lastApplied, rf.commitIndex)
@@ -479,7 +479,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// the reason is leader always send logs from nextIndex to THE END to follower, and LeaderCommit must lower than and equal to leader's log len
 			// after follower replicates args.Entries, follower can own all logs from leader, so args.LeaderCommit must lower than and equal to len(rf.logs) - 1
 			// rf.commitIndex = int(math.Min(float64(len(rf.logs) - 1), float64(args.LeaderCommit)))
-			rf.commitIndex = min(min(conflict_index+len(args.Entries[append_index:])-1, args.LeaderCommit), rf.localIndex2GlobalIndex(len(rf.logs)-1, rf.lastIncludeIndex))
+			rf.commitIndex = min(min(rf.localIndex2GlobalIndex(conflict_index+len(args.Entries[append_index:])-1, rf.lastIncludeIndex), args.LeaderCommit),
+				rf.localIndex2GlobalIndex(len(rf.logs)-1, rf.lastIncludeIndex))
 			rf.commitCond.Broadcast()
 		}
 		reply.Success = true
@@ -825,7 +826,7 @@ func (rf *Raft) leaderEmitInstallSnapshot(obj int) {
 		Data:             start_data,
 	}
 	reply := InstallSnapshotReply{}
-	retry_cnt := 10
+	retry_cnt := 5
 	retry_interval := 30
 	Debug(dLeader, "S%d %v(T: %v) send IS(first) to %v with LII: %v, LIT: %v", rf.me, rf.state.String(), rf.currentTerm, obj, rf.lastIncludeIndex, rf.lastIncludeTerm)
 	success := rf.sendInstallSnapshot(obj, &args, &reply)
@@ -915,7 +916,7 @@ func (rf *Raft) heartbeatMessage() {
 				rf.mu.Unlock()
 				return
 			}
-			max_size := 500
+			max_size := 250
 			ed := min(len(rf.logs), nxt_idx+max_size)
 			entries := make([]LogType, len(rf.logs[nxt_idx:ed]))
 			copy(entries, rf.logs[nxt_idx:ed])
@@ -932,7 +933,7 @@ func (rf *Raft) heartbeatMessage() {
 				LeaderCommit: save_commit_index,
 			}
 			reply := AppendEntriesReply{}
-			retry_cnt := 10
+			retry_cnt := 5
 			retry_interval := 30
 			Debug(dLeader, "S%d %v(T: %v) send AE(first) to %v, log len: %v, PLI: %v, PLT: %v, LC: %v",
 				rf.me, rf.state.String(), rf.currentTerm, idx, len(args.Entries), args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
@@ -967,14 +968,14 @@ func (rf *Raft) heartbeatMessage() {
 								}
 							}
 						}
-						if rf.commitIndex > save_commit_index && atomic.LoadInt32(&trigger_cnt) < 1 {
+						if rf.commitIndex > save_commit_index {
 							rf.commitCond.Broadcast()
 							// once leader commit this log entry, we send AE to followers
 							// we can't hold lock when sending message to channel, dead lock will occur!!
-							rf.mu.Unlock()
-							rf.sendTrigger <- struct{}{}
-							rf.mu.Lock()
-							atomic.AddInt32(&trigger_cnt, 1)
+							if atomic.LoadInt32(&trigger_cnt) < 1 {
+								rf.sendTrigger <- struct{}{}
+								atomic.AddInt32(&trigger_cnt, 1)
+							}
 						}
 					} else {
 						// not optimized code
@@ -1037,7 +1038,7 @@ func (rf *Raft) applyLog() {
 		}
 
 		if rf.state != Leader || (rf.state == Leader && can_apply) {
-			// Debug(dCommit, "S%d %v LA updates from %v to %v, entries: %+v", rf.me, rf.state.String(), rf.lastApplied, rf.commitIndex, entries)
+			Debug(dCommit, "S%d %v LA updates from %v to %v, entries: %+v", rf.me, rf.state.String(), rf.lastApplied, rf.commitIndex, rf.logs[st:ed])
 			rf.lastApplied = rf.commitIndex
 			for i, log := range rf.logs[st:ed] {
 				msg := ApplyMsg{CommandValid: true, Command: log.Command, CommandIndex: start_lastApplied + i + 1}
