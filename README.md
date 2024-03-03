@@ -19,7 +19,19 @@
 
 ## Illustration
 
-Complete accuracy of code cannot be guaranteed due to the randomness of execution. Basically, we have passed test cases from 2A to 2D over 500 times, and there are no failed tests occurred.
+Complete accuracy of code cannot be guaranteed due to the randomness of execution. Basically, we can nearly all pass unit tests from 2A to 2D over 500 times, and there are only failed tests occurred.
+
+```bash
+$ dstest -s -p 20 -n 500 2A 2B 2C 2D
+┏━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━━┓
+┃ Test ┃ Failed ┃ Total ┃          Time ┃
+┡━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━━┩
+│ 2A   │      0 │   500 │  13.82 ± 0.51 │
+│ 2B   │      0 │   500 │  34.72 ± 1.70 │
+│ 2C   │      1 │   500 │ 130.59 ± 5.68 │
+│ 2D   │      0 │   500 │ 137.03 ± 3.47 │
+└──────┴────────┴───────┴───────────────┘
+```
 
 ## Test
 
