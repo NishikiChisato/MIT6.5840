@@ -240,7 +240,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.lastIncludeIndex = content.LastIncludedIndex
 		rf.lastIncludeTerm = content.LastIncludedTerm
 
-		Debug(dPersist, "S%d %v after persist", rf.me, rf.state.String())
+		Debug(dPersist, "S%d %v after persist, log is: %+v", rf.me, rf.state.String(), rf.logs)
 	} else {
 		Debug(dError, "S%d %v recovery raft state from persist Fatal", rf.me, rf.state.String())
 	}
@@ -414,9 +414,9 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	Debug(dLog, "S%d %v (T: %v, LII: %v, LIT: %v, log len: %v) receive AE from %v(T: %v, PLI: %v, PLT: %v, LC: %v, log len: %v)",
-		rf.me, rf.state.String(), rf.currentTerm, rf.lastIncludeIndex, rf.lastIncludeTerm, len(rf.logs),
-		args.LeaderId, args.LeaderTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, len(args.Entries))
+	Debug(dLog, "S%d %v (T: %v, LII: %v, LIT: %v, log: %+v) receive AE from %v(T: %v, PLI: %v, PLT: %v, LC: %v)",
+		rf.me, rf.state.String(), rf.currentTerm, rf.lastIncludeIndex, rf.lastIncludeTerm, rf.logs,
+		args.LeaderId, args.LeaderTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 	// if leader own higher term, no matter what state the server is, should convert to follower
 	if rf.currentTerm < args.LeaderTerm {
 		rf.convertFollower(args.LeaderTerm)
@@ -478,9 +478,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// we can simply set rf.commitIndex = args.LeaderCommit instead of min(args.LeaderCommit, len(rf.logs) - 1)
 			// the reason is leader always send logs from nextIndex to THE END to follower, and LeaderCommit must lower than and equal to leader's log len
 			// after follower replicates args.Entries, follower can own all logs from leader, so args.LeaderCommit must lower than and equal to len(rf.logs) - 1
-			// rf.commitIndex = int(math.Min(float64(len(rf.logs) - 1), float64(args.LeaderCommit)))
-			rf.commitIndex = min(min(rf.localIndex2GlobalIndex(conflict_index+len(args.Entries[append_index:])-1, rf.lastIncludeIndex), args.LeaderCommit),
-				rf.localIndex2GlobalIndex(len(rf.logs)-1, rf.lastIncludeIndex))
+			// rf.commitIndex = int(math.Min(float64(len(rf.logs)), float64(args.LeaderCommit)))
+			rf.commitIndex = min(args.LeaderCommit, rf.localIndex2GlobalIndex(len(rf.logs), rf.lastIncludeIndex))
 			rf.commitCond.Broadcast()
 		}
 		reply.Success = true
@@ -627,27 +626,23 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) retryRequestVote(obj, retry_cnt, retry_interval int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ch := make(chan RequestVoteReply, retry_cnt)
-	fun := func(shutdown *atomic.Value) {
+	ch := make([]chan RequestVoteReply, retry_cnt)
+	fun := func(i int) {
 		save_reply := RequestVoteReply{}
 		Debug(dVote, "S%d %v send RV(retry) to %v", rf.me, rf.state.String(), obj)
-		if ok := rf.sendRequestVote(obj, args, &save_reply); ok && shutdown.Load() == false {
-			ch <- save_reply
+		if ok := rf.sendRequestVote(obj, args, &save_reply); ok {
+			ch[i] <- save_reply
 		}
 	}
 	for i := 0; i < retry_cnt; i++ {
-		var shutdown atomic.Value
-		shutdown.Store(false)
-		fun(&shutdown)
+		go fun(i)
 		select {
-		case ret := <-ch:
+		case ret := <-ch[i]:
 			Debug(dVote, "S%d %v retry to %v success", rf.me, rf.state.String(), obj)
 			reply.ReplyTerm = ret.ReplyTerm
 			reply.VoteGrant = ret.VoteGrant
-			shutdown.Store(true)
 			return true
 		case <-time.After(time.Millisecond * time.Duration(retry_interval)):
-			shutdown.Store(true)
 			continue
 		}
 	}
@@ -784,25 +779,21 @@ func (rf *Raft) startLeader() {
 }
 
 func (rf *Raft) retryEmitInstallSnapshot(obj, retry_cnt, retry_interval int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
-	ch := make(chan InstallSnapshotReply, retry_cnt)
-	fun := func(shutdown *atomic.Value) {
+	ch := make([]chan InstallSnapshotReply, retry_cnt)
+	fun := func(i int) {
 		save_reply := InstallSnapshotReply{}
 		Debug(dLeader, "S%d %v(term: %v) send IS(retry) to %v with lastIncludedIndex: %v, lastIncludeTerm: %v", rf.me, rf.state.String(), rf.currentTerm, obj, rf.lastIncludeIndex, rf.lastIncludeTerm)
-		if ok := rf.sendInstallSnapshot(obj, args, &save_reply); ok && shutdown.Load() == false {
-			ch <- save_reply
+		if ok := rf.sendInstallSnapshot(obj, args, &save_reply); ok {
+			ch[i] <- save_reply
 		}
 	}
 	for i := 0; i < retry_cnt; i++ {
-		var shutdown atomic.Value
-		shutdown.Store(false)
-		fun(&shutdown)
+		go fun(i)
 		select {
-		case ret := <-ch:
+		case ret := <-ch[i]:
 			reply.ReplyTerm = ret.ReplyTerm
-			shutdown.Store(true)
 			return true
 		case <-time.After(time.Millisecond * time.Duration(retry_interval)):
-			shutdown.Store(true)
 			continue
 		}
 	}
@@ -851,27 +842,23 @@ func (rf *Raft) leaderEmitInstallSnapshot(obj int) {
 }
 
 func (rf *Raft) retryHeartbeatMessage(obj, retry_cnt, retry_interval int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ch := make(chan AppendEntriesReply, retry_cnt)
-	fun := func(shutdown *atomic.Value) {
+	ch := make([]chan AppendEntriesReply, retry_cnt)
+	fun := func(i int) {
 		save_reply := AppendEntriesReply{}
-		if ok := rf.sendAppendEntries(obj, args, &save_reply); ok && shutdown.Load() == false {
-			ch <- save_reply
+		if ok := rf.sendAppendEntries(obj, args, &save_reply); ok {
+			ch[i] <- save_reply
 		}
 	}
 	for i := 0; i < retry_cnt; i++ {
-		var shutdown atomic.Value
-		shutdown.Store(false)
-		fun(&shutdown)
+		go fun(i)
 		select {
-		case ret := <-ch:
+		case ret := <-ch[i]:
 			reply.ReplyTerm = ret.ReplyTerm
 			reply.Success = ret.Success
 			reply.XIndex = ret.XIndex
 			reply.XTerm = ret.XTerm
-			shutdown.Store(true)
 			return true
 		case <-time.After(time.Millisecond * time.Duration(retry_interval)):
-			shutdown.Store(true)
 			continue
 		}
 	}
@@ -916,10 +903,8 @@ func (rf *Raft) heartbeatMessage() {
 				rf.mu.Unlock()
 				return
 			}
-			max_size := 250
-			ed := min(len(rf.logs), nxt_idx+max_size)
-			entries := make([]LogType, len(rf.logs[nxt_idx:ed]))
-			copy(entries, rf.logs[nxt_idx:ed])
+			entries := make([]LogType, len(rf.logs[nxt_idx:]))
+			copy(entries, rf.logs[nxt_idx:])
 			save_commit_index := rf.commitIndex
 			prev_index := nxt_idx - 1
 			prev_term := rf.logs[prev_index].Term
@@ -968,14 +953,14 @@ func (rf *Raft) heartbeatMessage() {
 								}
 							}
 						}
-						if rf.commitIndex > save_commit_index {
+						if rf.commitIndex > save_commit_index && atomic.LoadInt32(&trigger_cnt) < 1 {
 							rf.commitCond.Broadcast()
 							// once leader commit this log entry, we send AE to followers
 							// we can't hold lock when sending message to channel, dead lock will occur!!
-							if atomic.LoadInt32(&trigger_cnt) < 1 {
-								rf.sendTrigger <- struct{}{}
-								atomic.AddInt32(&trigger_cnt, 1)
-							}
+							rf.mu.Unlock()
+							rf.sendTrigger <- struct{}{}
+							rf.mu.Lock()
+							atomic.AddInt32(&trigger_cnt, 1)
 						}
 					} else {
 						// not optimized code
@@ -1024,8 +1009,8 @@ func (rf *Raft) applyLog() {
 		if rf.globalIndex2LocalIndex(start_lastApplied+1, rf.lastIncludeIndex) < 0 || rf.globalIndex2LocalIndex(rf.commitIndex+1, rf.lastIncludeIndex) > len(rf.logs) {
 			start_lastApplied = rf.lastIncludeIndex
 		}
-		st := rf.globalIndex2LocalIndex(rf.lastApplied+1, rf.lastIncludeIndex)
-		ed := rf.globalIndex2LocalIndex(rf.commitIndex+1, rf.lastIncludeIndex)
+		entries := make([]LogType, len(rf.logs[rf.globalIndex2LocalIndex(start_lastApplied+1, rf.lastIncludeIndex):rf.globalIndex2LocalIndex(rf.commitIndex+1, rf.lastIncludeIndex)]))
+		copy(entries, rf.logs[rf.globalIndex2LocalIndex(start_lastApplied+1, rf.lastIncludeIndex):rf.globalIndex2LocalIndex(rf.commitIndex+1, rf.lastIncludeIndex)])
 		can_apply := false
 
 		if rf.state == Leader {
@@ -1038,9 +1023,9 @@ func (rf *Raft) applyLog() {
 		}
 
 		if rf.state != Leader || (rf.state == Leader && can_apply) {
-			Debug(dCommit, "S%d %v LA updates from %v to %v, entries: %+v", rf.me, rf.state.String(), rf.lastApplied, rf.commitIndex, rf.logs[st:ed])
+			Debug(dCommit, "S%d %v LA updates from %v to %v, entries: %+v", rf.me, rf.state.String(), rf.lastApplied, rf.commitIndex, entries)
 			rf.lastApplied = rf.commitIndex
-			for i, log := range rf.logs[st:ed] {
+			for i, log := range entries {
 				msg := ApplyMsg{CommandValid: true, Command: log.Command, CommandIndex: start_lastApplied + i + 1}
 				// rf.logDebuger <- DebugMsg{apply: msg, msg: rf.state.String()}
 				Debug(dCommit, "S%d %v commit log: %+v at index: %v, start_lastApplied: %v", rf.me, rf.state.String(), log, start_lastApplied+i+1, start_lastApplied)
