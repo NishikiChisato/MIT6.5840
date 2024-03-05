@@ -175,6 +175,17 @@ func (rf *Raft) GetState() (int, bool) {
 	return x, y == Leader
 }
 
+func (rf *Raft) AsyncGetState() <-chan bool {
+	ch := make(chan bool)
+	go func() {
+		rf.mu.Lock()
+		z := rf.state == Leader
+		rf.mu.Unlock()
+		ch <- z
+	}()
+	return ch
+}
+
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -556,17 +567,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.persist()
 	index := rf.localIndex2GlobalIndex(len(rf.logs)-1, rf.lastIncludeIndex)
 	Debug(dClient, "S%d %v receive a new log: %+v", rf.me, rf.state.String(), new_log)
-	save_batch_timestamp := rf.batchTimestamp
 	rf.mu.Unlock()
 
-	// once leader receives a new log entry, send AE to followers
-	// we can't hold lock when sending message to channel, dead lock will occur!!
-	if time.Since(save_batch_timestamp) > time.Millisecond*time.Duration(5) {
-		rf.mu.Lock()
-		rf.batchTimestamp = time.Now()
-		rf.mu.Unlock()
-		rf.sendTrigger <- struct{}{}
-	}
+	rf.sendTrigger <- struct{}{}
 	return index, term, true
 }
 
@@ -875,7 +878,6 @@ func (rf *Raft) heartbeatMessage() {
 	// once heartbeatMessage was called, rf.cnt - 1 goroutine will be created, and will send rf.cnt - 1 times into rf.sendTrigger
 	// as long as rf.sendTrigger has content, heartbeatMessage will be called, and more and more goroutine will be create
 	// one heartbeatMessage should match once rf.sendTrigger
-	trigger_cnt := int32(0)
 	rf.mu.Unlock()
 	for i := 0; i < rf.cnt; i++ {
 		if i == rf.me {
@@ -940,6 +942,9 @@ func (rf *Raft) heartbeatMessage() {
 					return
 				} else if reply.ReplyTerm == start_term {
 					if reply.Success {
+						// we unlock when sending RPC, so, during this time, rf.matchIndex may be updated
+						// we should record rf.commitIndex when we come back, and than we judge whether rf.commitIndex can be updated
+						save_commit_index = rf.commitIndex
 						rf.nextIndex[idx] = rf.localIndex2GlobalIndex(nxt_idx, save_last_include_index) + len(entries)
 						rf.matchIndex[idx] = rf.nextIndex[idx] - 1
 						for i := rf.commitIndex + 1; i < rf.localIndex2GlobalIndex(len(rf.logs), save_last_include_index); i++ {
@@ -953,14 +958,13 @@ func (rf *Raft) heartbeatMessage() {
 								}
 							}
 						}
-						if rf.commitIndex > save_commit_index && atomic.LoadInt32(&trigger_cnt) < 1 {
+						if rf.commitIndex > save_commit_index {
 							rf.commitCond.Broadcast()
 							// once leader commit this log entry, we send AE to followers
 							// we can't hold lock when sending message to channel, dead lock will occur!!
 							rf.mu.Unlock()
 							rf.sendTrigger <- struct{}{}
 							rf.mu.Lock()
-							atomic.AddInt32(&trigger_cnt, 1)
 						}
 					} else {
 						// not optimized code
@@ -1015,7 +1019,7 @@ func (rf *Raft) applyLog() {
 
 		if rf.state == Leader {
 			for i := len(rf.logs) - 1; i >= 1; i-- {
-				if rf.logs[i].Term == rf.currentTerm && i <= rf.commitIndex {
+				if rf.logs[i].Term == rf.currentTerm && rf.localIndex2GlobalIndex(i, rf.lastIncludeIndex) <= rf.commitIndex {
 					can_apply = true
 					break
 				}
