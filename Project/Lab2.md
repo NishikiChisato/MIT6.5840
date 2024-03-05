@@ -376,7 +376,7 @@ func (rf *Raft) retryHeartbeatMessage(obj, retry_cnt, retry_interval int, args *
 
 ### Threads Amplification
 
-由于每次 `AE` 都会开启多个线程来同时发送 `RPC`，而这多个线程均有可能更改 `rf.commitIndex`。而在我的设计中，一旦 `rf.commitIndex` 发送了更改，我们就会发送一次 `AE`。这种设计存在的问题是，会有大量的后台线程在发送 `AE` 进而导致程序执行效率缓慢（在我的电脑上，开 `-race` 的情况下，`golang` 不允许线程数超过 `8128`，~~不要问我是怎么知道的~~）。一个最简单的解决办法是，无论 `rf.commitIndex` 被更改了多少次，我们只发送一次消息给 `sendTrigger`
+由于每次 `AE` 都会开启多个线程来同时发送 `RPC`，而这多个线程均有可能更改 `rf.commitIndex`。而在我的设计中，一旦 `rf.commitIndex` 发送了更改，我们就会发送一次 `AE`。这种设计存在的问题是，会有大量的后台线程在发送 `AE` 进而导致程序执行效率缓慢（在我的电脑上，开 `-race` 的情况下，`golang` 不允许线程数超过 `8128`，~~不要问我是怎么知道的~~）。一个最简单的解决办法是，我们在处理 `AE` 之前将 `rf.commitIndex` 保存一次，随后去判断是否需要更新 `rf.commitIndex`（遍历 `rf.matchIndex`），一旦需要更新我们立即向所有 `follower` 发送一次 `AE`
 
 ### Limiting the number of logs in AE
 
