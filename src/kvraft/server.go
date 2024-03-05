@@ -1,12 +1,14 @@
 package kvraft
 
 import (
-	"6.5840/labgob"
-	"6.5840/labrpc"
-	"6.5840/raft"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"6.5840/labgob"
+	"6.5840/labrpc"
+	"6.5840/raft"
 )
 
 const Debug = false
@@ -18,11 +20,21 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Type       string // Put, Append, Get
+	Key        string
+	Value      string
+	SeqNumber  int
+	Identifier int64
+}
+
+// record result for each operation to handles duplicated operation
+type OperationResult struct {
+	op  Op
+	ret string
 }
 
 type KVServer struct {
@@ -35,15 +47,186 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	db map[string]string
+	// used to track history of operation of each client
+	cliHistory map[int64]map[int]*OperationResult
+	// used to deduplicate operation
+	cliSeqNumber map[int64]map[int]bool
+	// used to wake up corresponding goroutine
+	// maybe sync.Map
+	opChan      map[int]*chan OperationResult
+	CommittedCh chan raft.ApplyMsg
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		kv.mu.Unlock()
+		reply.Err = ErrWrongLeader
+		DebugPrintf(dWarn, "S%d(server side) is wrong leader", kv.me)
+		return
+	}
+
+	if kv.cliSeqNumber[args.Identifier] != nil && kv.cliSeqNumber[args.Identifier][args.SeqNumber] {
+		reply.Err = ErrCmdExist
+		reply.Value = kv.cliHistory[args.Identifier][args.SeqNumber].ret
+		kv.mu.Unlock()
+		DebugPrintf(dWarn, "S%d(server side) cmd exists", kv.me)
+		return
+	}
+
+	if kv.cliSeqNumber[args.Identifier] == nil {
+		kv.cliSeqNumber[args.Identifier] = make(map[int]bool)
+	}
+	kv.cliSeqNumber[args.Identifier][args.SeqNumber] = true
+
+	cmd := Op{
+		Type:       "Get",
+		Key:        args.Key,
+		Identifier: args.Identifier,
+		SeqNumber:  args.SeqNumber,
+	}
+
+	idx, _, isLeader := kv.rf.Start(cmd)
+	DebugPrintf(dLeader, "S%d start Get with seq: %v, idx: %v", kv.me, cmd.SeqNumber, idx)
+
+	if !isLeader {
+		kv.mu.Unlock()
+		reply.Err = ErrWrongLeader
+		DebugPrintf(dWarn, "S%d(server side after start) is wrong leader", kv.me)
+		return
+	}
+
+	kv.opChan[idx] = new(chan OperationResult)
+	*kv.opChan[idx] = make(chan OperationResult)
+	ch := kv.opChan[idx]
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		close(*kv.opChan[idx])
+		delete(kv.opChan, idx)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case res := <-*ch:
+		reply.Err = OK
+		reply.Value = res.ret
+		if kv.cliHistory[cmd.Identifier] == nil {
+			kv.cliHistory[cmd.Identifier] = make(map[int]*OperationResult)
+		}
+		kv.cliHistory[cmd.Identifier][cmd.SeqNumber] = &res
+	case <-time.After(time.Second * time.Duration(5)):
+		reply.Err = ErrNotMajority
+		DebugPrintf(dError, "cmd: %+v timeout", cmd)
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		kv.mu.Unlock()
+		reply.Err = ErrWrongLeader
+		DebugPrintf(dWarn, "S%d(server side) is wrong leader", kv.me)
+		return
+	}
+
+	if kv.cliSeqNumber[args.Identifier] != nil && kv.cliSeqNumber[args.Identifier][args.SeqNumber] {
+		reply.Err = ErrCmdExist
+		kv.mu.Unlock()
+		DebugPrintf(dWarn, "S%d(server side) cmd exists", kv.me)
+		return
+	}
+
+	if kv.cliSeqNumber[args.Identifier] == nil {
+		kv.cliSeqNumber[args.Identifier] = make(map[int]bool)
+	}
+	kv.cliSeqNumber[args.Identifier][args.SeqNumber] = true
+
+	cmd := Op{
+		Type:       args.Op,
+		Key:        args.Key,
+		Value:      args.Value,
+		Identifier: args.Identifier,
+		SeqNumber:  args.SeqNumber,
+	}
+
+	idx, _, isLeader := kv.rf.Start(cmd)
+	DebugPrintf(dLeader, "S%d start %v with seq: %v, idx: %v", kv.me, cmd.Type, cmd.SeqNumber, idx)
+
+	if !isLeader {
+		kv.mu.Unlock()
+		reply.Err = ErrWrongLeader
+		DebugPrintf(dWarn, "S%d(server side after start) is wrong leader", kv.me)
+		return
+	}
+
+	kv.opChan[idx] = new(chan OperationResult)
+	*kv.opChan[idx] = make(chan OperationResult)
+	ch := kv.opChan[idx]
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		close(*kv.opChan[idx])
+		delete(kv.opChan, idx)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case <-*ch:
+		reply.Err = OK
+	case <-time.After(time.Second * time.Duration(5)):
+		reply.Err = ErrNotMajority
+		DebugPrintf(dError, "cmd: %+v timeout", cmd)
+	}
+}
+
+func (kv *KVServer) forward() {
+	for !kv.killed() {
+		for msg := range kv.applyCh {
+			DebugPrintf(dWarn, "S%d receives cmd: %+v at: %v", kv.me, msg.Command.(Op), msg.CommandIndex)
+			kv.CommittedCh <- msg
+		}
+	}
+}
+
+func (kv *KVServer) readFromRaft() {
+	for !kv.killed() {
+		msg := <-kv.CommittedCh
+		kv.mu.Lock()
+		DebugPrintf(dCommit, "S%d(replicate side) receive cmd: %+v from applyCh len: %v, committedCh len: %v", kv.me, msg.Command.(Op), len(kv.applyCh), len(kv.CommittedCh))
+		if msg.CommandValid {
+			cmd := msg.Command.(Op)
+
+			result := OperationResult{
+				op: cmd,
+			}
+			switch cmd.Type {
+			case "Get":
+				result.ret = kv.db[cmd.Key]
+			case "Put":
+				kv.db[cmd.Key] = cmd.Value
+			case "Append":
+				kv.db[cmd.Key] += cmd.Value
+			}
+
+			if isLeader := <-kv.rf.AsyncGetState(); isLeader {
+				DebugPrintf(dCommit, "S%d(replicate side) is leader", kv.me)
+				if kv.opChan[msg.CommandIndex] != nil && *kv.opChan[msg.CommandIndex] != nil {
+					DebugPrintf(dCommit, "S%d(replicate side) sending channel with seq: %v", kv.me, cmd.SeqNumber)
+					*kv.opChan[msg.CommandIndex] <- result
+					DebugPrintf(dCommit, "S%d(replicate side) channel sending done with seq: %v", kv.me, cmd.SeqNumber)
+				} else {
+					DebugPrintf(dError, "S%d(replicate side) channel close", kv.me)
+				}
+			}
+		}
+		kv.mu.Unlock()
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -92,6 +275,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+
+	kv.db = make(map[string]string)
+	kv.cliHistory = make(map[int64]map[int]*OperationResult)
+	kv.cliSeqNumber = make(map[int64]map[int]bool)
+	kv.opChan = make(map[int]*chan OperationResult)
+	kv.CommittedCh = make(chan raft.ApplyMsg, 10240)
+
+	go kv.readFromRaft()
+	go kv.forward()
 
 	return kv
 }

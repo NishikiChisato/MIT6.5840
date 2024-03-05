@@ -1,13 +1,21 @@
 package kvraft
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
+	"sync"
+	"time"
 
+	"6.5840/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	mu         sync.Mutex
+	identifier int64
+	seqNumber  int
+	lastLeader int
 }
 
 func nrand() int64 {
@@ -21,6 +29,10 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.seqNumber = 0
+	ck.identifier = nrand()
+	ck.lastLeader = 0
+	time.Sleep(time.Millisecond * time.Duration(300))
 	return ck
 }
 
@@ -37,7 +49,36 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+	ck.mu.Lock()
+	ck.seqNumber++
+	args := GetArgs{
+		Key:        key,
+		SeqNumber:  ck.seqNumber,
+		Identifier: ck.identifier,
+	}
+	ck.mu.Unlock()
+
+	var ret string
+	i := ck.lastLeader
+	for {
+		reply := GetReply{}
+		DebugPrintf(dTest, "sending Get: %v to %v, args: %+v", key, i, args)
+		ok := ck.sendGet(i, &args, &reply)
+		if ok {
+			if reply.Err == OK || reply.Err == ErrCmdExist {
+				ck.lastLeader = i
+				ret = reply.Value
+				break
+			}
+		}
+		i = (i + 1) % len(ck.servers)
+	}
+	return ret
+}
+
+func (ck *Clerk) sendGet(i int, args *GetArgs, reply *GetReply) bool {
+	ok := ck.servers[i].Call("KVServer.Get", args, reply)
+	return ok
 }
 
 // shared by Put and Append.
@@ -50,6 +91,35 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	ck.mu.Lock()
+	ck.seqNumber++
+	args := PutAppendArgs{
+		Op:         op,
+		Key:        key,
+		Value:      value,
+		SeqNumber:  ck.seqNumber,
+		Identifier: ck.identifier,
+	}
+	ck.mu.Unlock()
+
+	i := ck.lastLeader
+	for {
+		reply := PutAppendReply{}
+		DebugPrintf(dTest, "sending %v: key: %v, val: %v to %v, args: %+v", op, key, value, i, args)
+		ok := ck.sendPutAppend(i, &args, &reply)
+		if ok {
+			if reply.Err == OK || reply.Err == ErrCmdExist {
+				ck.lastLeader = i
+				break
+			}
+		}
+		i = (i + 1) % len(ck.servers)
+	}
+}
+
+func (ck *Clerk) sendPutAppend(i int, args *PutAppendArgs, reply *PutAppendReply) bool {
+	ok := ck.servers[i].Call("KVServer.PutAppend", args, reply)
+	return ok
 }
 
 func (ck *Clerk) Put(key string, value string) {
