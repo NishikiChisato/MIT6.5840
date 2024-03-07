@@ -202,6 +202,7 @@ func (kv *KVServer) readFromRaft() {
 			result := OperationResult{
 				op: cmd,
 			}
+			// since raft log doesn't strictly map to operations applied to KVServer, so we should pre-judge whether the current log is applied to KVServer or not
 			if kv.cliSeqNumber[cmd.Identifier][cmd.SeqNumber] {
 				kv.mu.Unlock()
 				continue
@@ -215,6 +216,8 @@ func (kv *KVServer) readFromRaft() {
 				kv.db[cmd.Key] += cmd.Value
 			}
 
+			// as long as raft committs a log, we can apply corresponding operations to KVServer
+			// this is because raft server as consensus modul to make consistence for log accross multiple KVServer
 			if kv.cliHistory[cmd.Identifier] == nil {
 				kv.cliHistory[cmd.Identifier] = make(map[int]*OperationResult)
 			}
