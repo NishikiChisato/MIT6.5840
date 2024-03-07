@@ -33,8 +33,9 @@ type Op struct {
 
 // record result for each operation to handles duplicated operation
 type OperationResult struct {
-	op  Op
-	ret string
+	op   Op
+	ret  string
+	term int
 }
 
 type KVServer struct {
@@ -76,11 +77,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	if kv.cliSeqNumber[args.Identifier] == nil {
-		kv.cliSeqNumber[args.Identifier] = make(map[int]bool)
-	}
-	kv.cliSeqNumber[args.Identifier][args.SeqNumber] = true
-
 	cmd := Op{
 		Type:       "Get",
 		Key:        args.Key,
@@ -88,7 +84,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		SeqNumber:  args.SeqNumber,
 	}
 
-	idx, _, isLeader := kv.rf.Start(cmd)
+	idx, term, isLeader := kv.rf.Start(cmd)
 	DebugPrintf(dLeader, "S%d start Get with seq: %v, idx: %v", kv.me, cmd.SeqNumber, idx)
 
 	if !isLeader {
@@ -112,13 +108,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	select {
 	case res := <-*ch:
-		reply.Err = OK
-		reply.Value = res.ret
-		if kv.cliHistory[cmd.Identifier] == nil {
-			kv.cliHistory[cmd.Identifier] = make(map[int]*OperationResult)
+		if res.term == term {
+			reply.Err = OK
+			reply.Value = res.ret
+		} else {
+			reply.Err = ErrNotMajority
+			DebugPrintf(dError, "cmd: %+v(term: %v) leader outdated with term: %v", cmd, term, res.term)
 		}
-		kv.cliHistory[cmd.Identifier][cmd.SeqNumber] = &res
-	case <-time.After(time.Second * time.Duration(5)):
+	case <-time.After(time.Millisecond * time.Duration(1000)):
 		reply.Err = ErrNotMajority
 		DebugPrintf(dError, "cmd: %+v timeout", cmd)
 	}
@@ -141,11 +138,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	if kv.cliSeqNumber[args.Identifier] == nil {
-		kv.cliSeqNumber[args.Identifier] = make(map[int]bool)
-	}
-	kv.cliSeqNumber[args.Identifier][args.SeqNumber] = true
-
 	cmd := Op{
 		Type:       args.Op,
 		Key:        args.Key,
@@ -154,7 +146,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		SeqNumber:  args.SeqNumber,
 	}
 
-	idx, _, isLeader := kv.rf.Start(cmd)
+	idx, term, isLeader := kv.rf.Start(cmd)
 	DebugPrintf(dLeader, "S%d start %v with seq: %v, idx: %v", kv.me, cmd.Type, cmd.SeqNumber, idx)
 
 	if !isLeader {
@@ -177,9 +169,15 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}()
 
 	select {
-	case <-*ch:
-		reply.Err = OK
-	case <-time.After(time.Second * time.Duration(5)):
+	case res := <-*ch:
+		if res.term == term {
+			reply.Err = OK
+
+		} else {
+			reply.Err = ErrNotMajority
+			DebugPrintf(dError, "cmd: %+v(term: %v) leader outdated with term: %v", cmd, term, res.term)
+		}
+	case <-time.After(time.Millisecond * time.Duration(1000)):
 		reply.Err = ErrNotMajority
 		DebugPrintf(dError, "cmd: %+v timeout", cmd)
 	}
@@ -188,7 +186,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) forward() {
 	for !kv.killed() {
 		for msg := range kv.applyCh {
-			DebugPrintf(dWarn, "S%d receives cmd: %+v at: %v", kv.me, msg.Command.(Op), msg.CommandIndex)
 			kv.CommittedCh <- msg
 		}
 	}
@@ -198,12 +195,16 @@ func (kv *KVServer) readFromRaft() {
 	for !kv.killed() {
 		msg := <-kv.CommittedCh
 		kv.mu.Lock()
-		DebugPrintf(dCommit, "S%d(replicate side) receive cmd: %+v from applyCh len: %v, committedCh len: %v", kv.me, msg.Command.(Op), len(kv.applyCh), len(kv.CommittedCh))
+		DebugPrintf(dLog, "S%d(replicate side) receive cmd: %+v from applyCh len: %v, committedCh len: %v", kv.me, msg.Command.(Op), len(kv.applyCh), len(kv.CommittedCh))
 		if msg.CommandValid {
 			cmd := msg.Command.(Op)
 
 			result := OperationResult{
 				op: cmd,
+			}
+			if kv.cliSeqNumber[cmd.Identifier][cmd.SeqNumber] {
+				kv.mu.Unlock()
+				continue
 			}
 			switch cmd.Type {
 			case "Get":
@@ -214,10 +215,21 @@ func (kv *KVServer) readFromRaft() {
 				kv.db[cmd.Key] += cmd.Value
 			}
 
-			if isLeader := <-kv.rf.AsyncGetState(); isLeader {
-				DebugPrintf(dCommit, "S%d(replicate side) is leader", kv.me)
+			if kv.cliHistory[cmd.Identifier] == nil {
+				kv.cliHistory[cmd.Identifier] = make(map[int]*OperationResult)
+			}
+			kv.cliHistory[cmd.Identifier][cmd.SeqNumber] = &result
+
+			if kv.cliSeqNumber[cmd.Identifier] == nil {
+				kv.cliSeqNumber[cmd.Identifier] = make(map[int]bool)
+			}
+			kv.cliSeqNumber[cmd.Identifier][cmd.SeqNumber] = true
+
+			if term, isLeader := kv.rf.GetState(); isLeader {
+				DebugPrintf(dLog, "S%d(replicate side) is leader", kv.me)
 				if kv.opChan[msg.CommandIndex] != nil && *kv.opChan[msg.CommandIndex] != nil {
 					DebugPrintf(dCommit, "S%d(replicate side) sending channel with seq: %v", kv.me, cmd.SeqNumber)
+					result.term = term
 					*kv.opChan[msg.CommandIndex] <- result
 					DebugPrintf(dCommit, "S%d(replicate side) channel sending done with seq: %v", kv.me, cmd.SeqNumber)
 				} else {

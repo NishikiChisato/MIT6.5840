@@ -62,8 +62,9 @@ func (ck *Clerk) Get(key string) string {
 	i := ck.lastLeader
 	for {
 		reply := GetReply{}
-		DebugPrintf(dTest, "sending Get: %v to %v, args: %+v", key, i, args)
+		DebugPrintf(dTest, "sending Get key: %v to %v, args: %+v", key, i, args)
 		ok := ck.sendGet(i, &args, &reply)
+		DebugPrintf(dTest, "reply: %+v", reply.Err)
 		if ok {
 			if reply.Err == OK || reply.Err == ErrCmdExist {
 				ck.lastLeader = i
@@ -107,6 +108,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		reply := PutAppendReply{}
 		DebugPrintf(dTest, "sending %v: key: %v, val: %v to %v, args: %+v", op, key, value, i, args)
 		ok := ck.sendPutAppend(i, &args, &reply)
+		DebugPrintf(dTest, "reply: %+v", reply.Err)
 		if ok {
 			if reply.Err == OK || reply.Err == ErrCmdExist {
 				ck.lastLeader = i
