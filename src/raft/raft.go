@@ -299,6 +299,26 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	}()
 }
 
+// we provide synchronous version of snapshot for upper layer
+func (rf *Raft) SyncSnapshot(index int, snapshot []byte) {
+	rf.mu.Lock()
+	if index <= rf.lastIncludeIndex || index > rf.commitIndex || index > rf.lastApplied {
+		// no matter current server is leader or follower, the interval of snapshot ranges from rf.lastIncludeIndex + 1(included) to rf.lastApplied(included)
+		rf.mu.Unlock()
+		return
+	}
+	Debug(dClient, "S%d %s receive snapshot request at %v", rf.me, rf.state.String(), index)
+
+	rf.logs[0] = rf.logs[rf.globalIndex2LocalIndex(index, rf.lastIncludeIndex)]
+	rf.logs = append(rf.logs[:1], rf.logs[rf.globalIndex2LocalIndex(index, rf.lastIncludeIndex)+1:]...)
+	rf.lastIncludeIndex = index
+	rf.lastIncludeTerm = rf.logs[0].Term
+
+	rf.snapshot = snapshot
+	rf.persist()
+	rf.mu.Unlock()
+}
+
 type InstallSnapshotArgs struct {
 	LeaderTerm       int
 	LeaderId         int
@@ -444,6 +464,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		if args.PrevLogIndex < rf.lastIncludeIndex {
 			reply.Success = true
+			reply.ReplyTerm = rf.currentTerm
 			return
 		}
 
