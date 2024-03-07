@@ -53,25 +53,28 @@ type KVServer struct {
 	cliSeqNumber map[int64]int
 	// used to wake up corresponding goroutine
 	// maybe sync.Map
+	// to address deplicated request
+	// clerk may issue deplicate request somehow(during leader election), the effect of duplicated request must equivalent to the effect of this request first execute
+	// for example, if deplicated Get("key") arrives for one clerk, but during the interval of two Get("key"), another clerk update the value of "key"
+	// now, the two Get("key") operations should return identical result
+	// the same as Get operation, deplicated Put or Append should only executes once
+	cliHistory map[int64]string
+
 	opChan      map[int]*chan OperationResult
 	CommittedCh chan raft.ApplyMsg
 
 	persister *raft.Persister
+	// for all msg.commitIndex <= snapshotIndex, log entries are stored in snapshot
+	snapshotIndex int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		kv.mu.Unlock()
-		reply.Err = ErrWrongLeader
-		DebugPrintf(dWarn, "S%d(server side) is wrong leader", kv.me)
-		return
-	}
 
 	if args.SeqNumber <= kv.cliSeqNumber[args.Identifier] {
 		reply.Err = ErrCmdExist
-		reply.Value = kv.db[args.Key]
+		reply.Value = kv.cliHistory[args.Identifier]
 		kv.mu.Unlock()
 		DebugPrintf(dWarn, "S%d(server side) cmd exists", kv.me)
 		return
@@ -85,7 +88,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	idx, term, isLeader := kv.rf.Start(cmd)
-	DebugPrintf(dLeader, "S%d start Get with seq: %v, idx: %v", kv.me, cmd.SeqNumber, idx)
+	DebugPrintf(dLeader, "S%d start Get with seq: %v, idx: %v(rfat sz: %v, snapshot sz: %v)",
+		kv.me, cmd.SeqNumber, idx, kv.persister.RaftStateSize(), kv.persister.SnapshotSize())
 
 	if !isLeader {
 		kv.mu.Unlock()
@@ -124,12 +128,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		kv.mu.Unlock()
-		reply.Err = ErrWrongLeader
-		DebugPrintf(dWarn, "S%d(server side) is wrong leader", kv.me)
-		return
-	}
 
 	if args.SeqNumber <= kv.cliSeqNumber[args.Identifier] {
 		reply.Err = ErrCmdExist
@@ -147,7 +145,8 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	idx, term, isLeader := kv.rf.Start(cmd)
-	DebugPrintf(dLeader, "S%d start %v with seq: %v, idx: %v", kv.me, cmd.Type, cmd.SeqNumber, idx)
+	DebugPrintf(dLeader, "S%d start %v with seq: %v, idx: %v(raft state sz: %v, snapshot sz: %v)",
+		kv.me, cmd.Type, cmd.SeqNumber, idx, kv.persister.RaftStateSize(), kv.persister.SnapshotSize())
 
 	if !isLeader {
 		kv.mu.Unlock()
@@ -202,7 +201,8 @@ func (kv *KVServer) readFromRaft() {
 
 			result := OperationResult{}
 			// since raft log doesn't strictly map to operations applied to KVServer, so we should pre-judge whether the current log is applied to KVServer or not
-			if cmd.SeqNumber <= kv.cliSeqNumber[cmd.Identifier] {
+			// we should ignore log entries with index lower than kv.snapshotIndex, since these log entries must exist in snapshot
+			if cmd.SeqNumber <= kv.cliSeqNumber[cmd.Identifier] || msg.CommandIndex <= kv.snapshotIndex {
 				kv.mu.Unlock()
 				continue
 			}
@@ -219,12 +219,19 @@ func (kv *KVServer) readFromRaft() {
 			// this is because raft server as consensus modul to make consistence for log accross multiple KVServer
 
 			kv.cliSeqNumber[cmd.Identifier] = cmd.SeqNumber
+			kv.cliHistory[cmd.Identifier] = kv.db[cmd.Key]
+
+			term, isLeader := kv.rf.GetState()
 
 			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate {
-				kv.snapshot(msg.CommandIndex)
+				// we cannot trim raft log at msg.CommandIndex, since there is a scenario that somehow one follower may not replicate log with index of msg.CommandIndex
+				// in the case of this scenario, that follower may not receive that log entry forever
+				threshold := 1
+				kv.snapshot(msg.CommandIndex - threshold)
+				kv.snapshotIndex = max(kv.snapshotIndex, threshold)
 			}
 
-			if term, isLeader := kv.rf.GetState(); isLeader {
+			if isLeader {
 				DebugPrintf(dLog, "S%d(replicate side) is leader", kv.me)
 				if kv.opChan[msg.CommandIndex] != nil && *kv.opChan[msg.CommandIndex] != nil {
 					DebugPrintf(dCommit, "S%d(replicate side) sending channel with seq: %v", kv.me, cmd.SeqNumber)
@@ -235,6 +242,10 @@ func (kv *KVServer) readFromRaft() {
 					DebugPrintf(dError, "S%d(replicate side) channel close", kv.me)
 				}
 			}
+		} else if msg.SnapshotValid {
+			// when leader emit IS to follower, follower should read from that snapshot to rebuild its local database
+			kv.readRaftSnapshot(msg.Snapshot)
+			kv.snapshotIndex = max(kv.snapshotIndex, msg.SnapshotIndex)
 		}
 		kv.mu.Unlock()
 	}
@@ -243,6 +254,7 @@ func (kv *KVServer) readFromRaft() {
 type PersistType struct {
 	Db           map[string]string
 	CliSeqNumber map[int64]int
+	CliHistory   map[int64]string
 }
 
 func (kv *KVServer) snapshot(idx int) {
@@ -258,11 +270,17 @@ func (kv *KVServer) snapshot(idx int) {
 		snapshot.CliSeqNumber[key] = val
 	}
 
+	snapshot.CliHistory = make(map[int64]string)
+	for key, val := range kv.cliHistory {
+		snapshot.CliHistory[key] = val
+	}
+
 	buf := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buf)
 	enc.Encode(&snapshot)
 
-	kv.rf.Snapshot(idx, buf.Bytes())
+	DebugPrintf(dPersist, "S%d persist state at %v(rf state sz: %v)", kv.me, idx, kv.persister.RaftStateSize())
+	kv.rf.SyncSnapshot(idx, buf.Bytes())
 }
 
 func (kv *KVServer) readRaftSnapshot(data []byte) {
@@ -270,7 +288,18 @@ func (kv *KVServer) readRaftSnapshot(data []byte) {
 	dec := labgob.NewDecoder(buf)
 	var snapshot PersistType
 	if dec.Decode(&snapshot) == nil {
-		kv.db = snapshot.Db
+		for key, val := range snapshot.Db {
+			kv.db[key] = val
+		}
+
+		for key, val := range snapshot.CliSeqNumber {
+			kv.cliSeqNumber[key] = val
+		}
+
+		for key, val := range snapshot.CliHistory {
+			kv.cliHistory[key] = val
+		}
+		DebugPrintf(dPersist, "S%d recover from crash ", kv.me)
 	} else {
 		DebugPrintf(dError, "S%d read from snapshot error", kv.me)
 	}
@@ -323,12 +352,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.readRaftSnapshot(persister.ReadSnapshot())
 
 	kv.db = make(map[string]string)
 	kv.cliSeqNumber = make(map[int64]int)
 	kv.opChan = make(map[int]*chan OperationResult)
 	kv.CommittedCh = make(chan raft.ApplyMsg, 10240)
+	kv.cliHistory = make(map[int64]string)
+
+	kv.readRaftSnapshot(persister.ReadSnapshot())
 
 	go kv.readFromRaft()
 	go kv.forward()
