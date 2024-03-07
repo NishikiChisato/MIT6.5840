@@ -11,17 +11,18 @@ import (
 type logTopic string
 
 const (
-	dClient logTopic = "CLNT"
-	dCommit logTopic = "CMIT"
-	dDrop   logTopic = "DROP"
-	dError  logTopic = "ERRO"
-	dInfo   logTopic = "INFO"
-	dLog    logTopic = "LOG1"
-	dLog2   logTopic = "LOG2"
-	dTest   logTopic = "TEST"
-	dTrace  logTopic = "TRCE"
-	dWarn   logTopic = "WARN"
-	dLeader logTopic = "LEAD"
+	dClient  logTopic = "CLNT"
+	dCommit  logTopic = "CMIT"
+	dDrop    logTopic = "DROP"
+	dError   logTopic = "ERRO"
+	dInfo    logTopic = "INFO"
+	dLog     logTopic = "LOG1"
+	dLog2    logTopic = "LOG2"
+	dTest    logTopic = "TEST"
+	dTrace   logTopic = "TRCE"
+	dWarn    logTopic = "WARN"
+	dLeader  logTopic = "LEAD"
+	dPersist logTopic = "PERS"
 )
 
 // Debugging
