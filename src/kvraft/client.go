@@ -73,6 +73,7 @@ func (ck *Clerk) Get(key string) string {
 			}
 		}
 		i = (i + 1) % len(ck.servers)
+		time.Sleep(time.Millisecond * time.Duration(50))
 	}
 	return ret
 }
@@ -116,6 +117,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			}
 		}
 		i = (i + 1) % len(ck.servers)
+		time.Sleep(time.Millisecond * time.Duration(50))
 	}
 }
 
