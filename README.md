@@ -10,9 +10,9 @@
   - [x] Lab 2B
   - [x] Lab 2C
   - [x] Lab 2D
-- [ ] Lab 3
-  - [ ] Lab 3A
-  - [ ] Lab 3B
+- [x] Lab 3
+  - [x] Lab 3A
+  - [x] Lab 3B
 - [ ] Lab 4
   - [ ] Lab 4A
   - [ ] Lab 4B
@@ -35,9 +35,7 @@ $ dstest -s -p 20 -n 500 2A 2B 2C 2D
 
 ## Test
 
-### Lab 2
-
-Firstly, write the following two files to `/usr/local/bin` and saved them as `dslogs` and `dstest`, resepctively.
+We take lab2 as an example. Firstly, write the following two files to `/usr/local/bin` and saved them as `dslogs` and `dstest`, resepctively. You can go into [`util.go`](./src/raft/util.go) and set `debug` to allow logs to be open or not.
 
 ```bash
 #!/bin/bash
@@ -57,5 +55,4 @@ Also bear in mind that change these file mods to executable. [`dslogs.py`](https
 The variable `debug` in [`util.go`](./src/raft/util.go) controls whether or not logs are output. You can input `dslogs --help` or `dstest --help` to get ideas of how to use it.
 
 In [`auxiliary.go`](./src/raft/auxiliary.go), The function `WriteLog` can be used to examine which logs have been applied for different servers. If you want to use it, please uncomment `logDebuger` in [`raft.go`](./src/raft/raft.go)
-
 
