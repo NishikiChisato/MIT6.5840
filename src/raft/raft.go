@@ -594,6 +594,31 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, true
 }
 
+func (rf *Raft) ReadStart() bool {
+	_, isLeader := rf.GetState()
+	if !isLeader {
+		return false
+	}
+	rf.mu.Lock()
+	readIndex := rf.commitIndex
+	rf.mu.Unlock()
+	isMajority := rf.heartbeatMessage()
+	if ok := <-isMajority; !ok {
+		return false
+	}
+	st := time.Now()
+	for time.Since(st) <= time.Millisecond*500 {
+		rf.mu.Lock()
+		if rf.lastApplied >= readIndex {
+			rf.mu.Unlock()
+			return true
+		}
+		rf.mu.Unlock()
+		time.Sleep(time.Millisecond * 25)
+	}
+	return false
+}
+
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -734,6 +759,7 @@ func (rf *Raft) startElection(election_timeout int32) {
 						Debug(dVote, "S%d %v become leader in term %v", rf.me, rf.state.String(), rf.currentTerm)
 						rf.startLeader()
 						rf.mu.Unlock()
+						rf.Start(nil)
 						return
 					}
 				}
@@ -889,22 +915,29 @@ func (rf *Raft) retryHeartbeatMessage(obj, retry_cnt, retry_interval int, args *
 	return false
 }
 
-func (rf *Raft) heartbeatMessage() {
+// if current leader is not a leader, return false
+// if current leader not get a majority of response, return false
+func (rf *Raft) heartbeatMessage() chan bool {
 	rf.mu.Lock()
 	if rf.state != Leader {
 		rf.mu.Unlock()
-		return
+		return nil
 	}
 	start_term := rf.currentTerm
 	// once heartbeatMessage was called, rf.cnt - 1 goroutine will be created, and will send rf.cnt - 1 times into rf.sendTrigger
 	// as long as rf.sendTrigger has content, heartbeatMessage will be called, and more and more goroutine will be create
 	// one heartbeatMessage should match once rf.sendTrigger
 	rf.mu.Unlock()
+	var receive_cnt int32
+	var wg sync.WaitGroup
+	ch := make(chan bool)
 	for i := 0; i < rf.cnt; i++ {
 		if i == rf.me {
 			continue
 		}
+		wg.Add(1)
 		go func(idx int) {
+			defer wg.Done()
 			rf.mu.Lock()
 			save_last_include_index := rf.lastIncludeIndex
 			nxt_idx := rf.globalIndex2LocalIndex(rf.nextIndex[idx], save_last_include_index)
@@ -962,6 +995,7 @@ func (rf *Raft) heartbeatMessage() {
 					rf.mu.Unlock()
 					return
 				} else if reply.ReplyTerm == start_term {
+					atomic.AddInt32(&receive_cnt, 1)
 					if reply.Success {
 						// we unlock when sending RPC, so, during this time, rf.matchIndex may be updated
 						// we should record rf.commitIndex when we come back, and than we judge whether rf.commitIndex can be updated
@@ -1022,6 +1056,15 @@ func (rf *Raft) heartbeatMessage() {
 			rf.mu.Unlock()
 		}(i)
 	}
+	go func() {
+		wg.Wait()
+		if receive_cnt >= (int32(rf.cnt)+1)/2 {
+			ch <- true
+		} else {
+			ch <- false
+		}
+	}()
+	return ch
 }
 
 func (rf *Raft) applyLog() {
