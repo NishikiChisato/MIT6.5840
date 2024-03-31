@@ -212,6 +212,7 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 		return "snapshot Decode() error"
 	}
 	if index != -1 && index != lastIncludedIndex {
+		fmt.Printf("index: %v, LII: %v\n", index, lastIncludedIndex)
 		err := fmt.Sprintf("server %v snapshot doesn't match m.SnapshotIndex", i)
 		Debug(dError, "S%d snapshot with index: %v doesn't match index: %v", i, lastIncludedIndex, index)
 		return err

@@ -84,6 +84,16 @@ const (
 	colorWhite  = "\033[37m"
 )
 
+const (
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey" // not used
+	ErrWrongLeader = "ErrWrongLeader"
+	ErrNotMajority = "ErrNotMajority"
+	ErrCmdExist    = "ErrCmdExist"
+)
+
+type Err string
+
 type LogType struct {
 	Command interface{}
 	Term    int
@@ -139,15 +149,14 @@ type Raft struct {
 
 	// log replicated
 	// index 0 either be empty log entry or log entry with lastIncludeIndex and lastIncludeTerm
-	logs           []LogType
-	lastApplied    int
-	commitIndex    int
-	commitCond     *sync.Cond
-	nextIndex      map[int]int
-	matchIndex     map[int]int
-	tester         chan ApplyMsg
-	sendTrigger    chan struct{}
-	batchTimestamp time.Time
+	logs        []LogType
+	lastApplied int
+	commitIndex int
+	commitCond  *sync.Cond
+	nextIndex   map[int]int
+	matchIndex  map[int]int
+	tester      chan ApplyMsg
+	sendTrigger chan struct{}
 
 	// persist
 	// the object of persist not only currentTerm/voteFor/logs, but snapshot
@@ -158,6 +167,9 @@ type Raft struct {
 	snapshot         []byte
 	lastIncludeIndex int
 	lastIncludeTerm  int
+
+	// ReadIndex & LeaseRead
+	leaseTimestamp time.Time
 }
 
 // return currentTerm and whether this server
@@ -594,29 +606,41 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, true
 }
 
-func (rf *Raft) ReadStart() bool {
+func (rf *Raft) ReadStart() string {
 	_, isLeader := rf.GetState()
 	if !isLeader {
-		return false
+		return ErrWrongLeader
 	}
 	rf.mu.Lock()
 	readIndex := rf.commitIndex
 	rf.mu.Unlock()
+
+	// election timeout range from 250ms to 650ms
+	// we specify 10 for lease
+	leaseDuration := time.Millisecond * 100
+
 	isMajority := rf.heartbeatMessage()
 	if ok := <-isMajority; !ok {
-		return false
+		// ReadIndex optimization
+		// return ErrNotMajority
+		// LeaseRead optimization
+		if time.Since(rf.leaseTimestamp) <= leaseDuration {
+			return OK
+		}
+		return ErrNotMajority
 	}
 	st := time.Now()
-	for time.Since(st) <= time.Millisecond*500 {
+	for time.Since(st) <= time.Millisecond*300 {
 		rf.mu.Lock()
+		// fmt.Printf("S%d LA: %v, RI: %v\n", rf.me, rf.lastApplied, readIndex)
 		if rf.lastApplied >= readIndex {
 			rf.mu.Unlock()
-			return true
+			return OK
 		}
 		rf.mu.Unlock()
 		time.Sleep(time.Millisecond * 25)
 	}
-	return false
+	return ErrWrongLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -759,7 +783,7 @@ func (rf *Raft) startElection(election_timeout int32) {
 						Debug(dVote, "S%d %v become leader in term %v", rf.me, rf.state.String(), rf.currentTerm)
 						rf.startLeader()
 						rf.mu.Unlock()
-						rf.Start(nil)
+						// rf.Start(nil)
 						return
 					}
 				}
@@ -923,12 +947,13 @@ func (rf *Raft) heartbeatMessage() chan bool {
 		rf.mu.Unlock()
 		return nil
 	}
+	rf.leaseTimestamp = time.Now()
 	start_term := rf.currentTerm
 	// once heartbeatMessage was called, rf.cnt - 1 goroutine will be created, and will send rf.cnt - 1 times into rf.sendTrigger
 	// as long as rf.sendTrigger has content, heartbeatMessage will be called, and more and more goroutine will be create
 	// one heartbeatMessage should match once rf.sendTrigger
 	rf.mu.Unlock()
-	var receive_cnt int32
+	receive_cnt := int32(1)
 	var wg sync.WaitGroup
 	ch := make(chan bool)
 	for i := 0; i < rf.cnt; i++ {
@@ -1060,9 +1085,9 @@ func (rf *Raft) heartbeatMessage() chan bool {
 		wg.Wait()
 		if receive_cnt >= (int32(rf.cnt)+1)/2 {
 			ch <- true
-		} else {
-			ch <- false
+			return
 		}
+		ch <- false
 	}()
 	return ch
 }
@@ -1134,7 +1159,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		matchIndex:        make(map[int]int),
 		tester:            applyCh,
 		sendTrigger:       make(chan struct{}, 1024),
-		batchTimestamp:    time.Now(),
 		logDebuger:        make(chan DebugMsg, 1024),
 		snapshot:          nil,
 		lastIncludeIndex:  0,
