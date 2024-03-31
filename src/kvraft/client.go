@@ -32,7 +32,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.seqNumber = 0
 	ck.identifier = nrand()
 	ck.lastLeader = 0
-	time.Sleep(time.Millisecond * time.Duration(300))
+	time.Sleep(time.Millisecond * 300)
 	return ck
 }
 
@@ -62,16 +62,13 @@ func (ck *Clerk) Get(key string) string {
 	i := ck.lastLeader
 	for {
 		reply := GetReply{}
-		DebugPrintf(dTest, "sending Get key: %v to %v, args: %+v", key, i, args)
-		ok := ck.sendGet(i, &args, &reply)
-		DebugPrintf(dTest, "reply: %+v", reply.Err)
-		if ok {
-			if reply.Err == OK || reply.Err == ErrCmdExist {
-				ck.lastLeader = i
-				ret = reply.Value
-				break
-			}
+		DebugPrintf(dClient, "S%d Get(seq: %v) key at %v", ck.identifier, args.SeqNumber, key)
+		if ok := ck.sendGet(i, &args, &reply); ok && (reply.Err == OK || reply.Err == ErrCmdExist) {
+			ck.lastLeader = i
+			ret = reply.Value
+			break
 		}
+		DebugPrintf(dError, "S%d Get(seq: %v) err: %v", ck.identifier, args.SeqNumber, reply.Err)
 		i = (i + 1) % len(ck.servers)
 		time.Sleep(time.Millisecond * time.Duration(100))
 	}
@@ -107,15 +104,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	i := ck.lastLeader
 	for {
 		reply := PutAppendReply{}
-		DebugPrintf(dTest, "sending %v: key: %v, val: %v to %v, args: %+v", op, key, value, i, args)
-		ok := ck.sendPutAppend(i, &args, &reply)
-		DebugPrintf(dTest, "reply: %+v", reply.Err)
-		if ok {
-			if reply.Err == OK || reply.Err == ErrCmdExist {
-				ck.lastLeader = i
-				break
-			}
+		DebugPrintf(dClient, "S%d PutAppend(seq: %v, type: %v) key at %v, val at: %v", ck.identifier, args.SeqNumber, args.Op, key, value)
+		if ok := ck.sendPutAppend(i, &args, &reply); ok && (reply.Err == OK || reply.Err == ErrCmdExist) {
+			ck.lastLeader = i
+			break
 		}
+		DebugPrintf(dError, "S%d PutAppend(seq: %v, type: %v) err: %v", ck.identifier, args.SeqNumber, args.Op, reply.Err)
 		i = (i + 1) % len(ck.servers)
 		time.Sleep(time.Millisecond * time.Duration(100))
 	}
