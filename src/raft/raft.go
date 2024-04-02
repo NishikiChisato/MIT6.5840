@@ -169,7 +169,12 @@ type Raft struct {
 	lastIncludeTerm  int
 
 	// ReadIndex & LeaseRead
-	leaseTimestamp time.Time
+	leaseRead LeaseReadMechanism
+}
+
+type LeaseReadMechanism struct {
+	start  time.Time
+	isWork bool
 }
 
 // return currentTerm and whether this server
@@ -613,32 +618,29 @@ func (rf *Raft) ReadStart() string {
 	}
 	rf.mu.Lock()
 	readIndex := rf.commitIndex
+	leaseMeta := rf.leaseRead
 	rf.mu.Unlock()
 
-	// election timeout range from 250ms to 650ms
-	// we specify 10 for lease
-	leaseDuration := time.Millisecond * 100
-
-	isMajority := rf.heartbeatMessage()
-	if ok := <-isMajority; !ok {
-		// ReadIndex optimization
-		// return ErrNotMajority
-		// LeaseRead optimization
-		if time.Since(rf.leaseTimestamp) <= leaseDuration {
-			return OK
+	// election timeout ranges from 250ms to 650ms
+	leaseDuration := time.Millisecond * 200
+	if (leaseMeta.isWork && time.Since(leaseMeta.start) > leaseDuration) || !leaseMeta.isWork {
+		isMajority := rf.heartbeatMessage()
+		if ok := <-isMajority; !ok {
+			// ReadIndex optimization
+			return ErrNotMajority
 		}
-		return ErrNotMajority
 	}
+
 	st := time.Now()
-	for time.Since(st) <= time.Millisecond*300 {
+	for time.Since(st) <= time.Millisecond*50 {
 		rf.mu.Lock()
-		// fmt.Printf("S%d LA: %v, RI: %v\n", rf.me, rf.lastApplied, readIndex)
+		// fmt.Printf("LA: %v, RI: %v\n", rf.lastApplied, readIndex)
 		if rf.lastApplied >= readIndex {
 			rf.mu.Unlock()
 			return OK
 		}
 		rf.mu.Unlock()
-		time.Sleep(time.Millisecond * 25)
+		time.Sleep(time.Millisecond * 10)
 	}
 	return ErrWrongLeader
 }
@@ -783,7 +785,7 @@ func (rf *Raft) startElection(election_timeout int32) {
 						Debug(dVote, "S%d %v become leader in term %v", rf.me, rf.state.String(), rf.currentTerm)
 						rf.startLeader()
 						rf.mu.Unlock()
-						// rf.Start(nil)
+						rf.Start(nil)
 						return
 					}
 				}
@@ -947,7 +949,10 @@ func (rf *Raft) heartbeatMessage() chan bool {
 		rf.mu.Unlock()
 		return nil
 	}
-	rf.leaseTimestamp = time.Now()
+	rf.leaseRead = LeaseReadMechanism{
+		start:  time.Now(),
+		isWork: false,
+	}
 	start_term := rf.currentTerm
 	// once heartbeatMessage was called, rf.cnt - 1 goroutine will be created, and will send rf.cnt - 1 times into rf.sendTrigger
 	// as long as rf.sendTrigger has content, heartbeatMessage will be called, and more and more goroutine will be create
@@ -1084,6 +1089,9 @@ func (rf *Raft) heartbeatMessage() chan bool {
 	go func() {
 		wg.Wait()
 		if receive_cnt >= (int32(rf.cnt)+1)/2 {
+			rf.mu.Lock()
+			rf.leaseRead.isWork = true
+			rf.mu.Unlock()
 			ch <- true
 			return
 		}
