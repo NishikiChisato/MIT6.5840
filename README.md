@@ -21,6 +21,8 @@
 
 Complete accuracy of code cannot be guaranteed due to the randomness of execution. Basically, we can nearly all pass unit tests from 2A to 2D over 500 times, and there are only failed tests occurred.
 
+> PAY ATTENTION that **only** when we have commented [`raft.go`](./src/raft/raft.go) line 787, we can pass unit tests 2B. 
+
 ```bash
 $ dstest -s -p 20 -n 500 2A 2B 2C 2D
 ┏━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━━┓
@@ -56,3 +58,30 @@ The variable `debug` in [`util.go`](./src/raft/util.go) controls whether or not 
 
 In [`auxiliary.go`](./src/raft/auxiliary.go), The function `WriteLog` can be used to examine which logs have been applied for different servers. If you want to use it, please uncomment `logDebuger` in [`raft.go`](./src/raft/raft.go)
 
+
+## Profiling
+
+```go
+go test -cpuprofile cpu.prof -memprofile mem.prof -bench .
+```
+
+If you want to generate Flame Graph, you can(use this [repository](https://github.com/brendangregg/FlameGraph)):
+
+```bash
+go tool pprof -raw -output=cpu.txt cpu.pprof
+./stackcollapse-go.pl cpu.txt > out.folded
+./flamegraph.pl out.folded > out.svg
+```
+
+## QPS
+
+We can use tests framework of [lab3](./src/kvraft/test_test.go) to check the QPS of Raft:
+
+```bash
+go test -run TestQPS
+servers: 3, clients: 12
+Test: snapshots, random keys, many clients (3B) ...
+  ... Passed --  15.8  3 318004 95847
+PASS
+ok  	6.5840/kvraft	15.901s
+```

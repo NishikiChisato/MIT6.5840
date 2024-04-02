@@ -724,5 +724,8 @@ func TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable3B(t *testing.T
 }
 
 func TestQPS(t *testing.T) {
-	GenericTest(t, "3B", 10, 5, false, false, false, 1000, true)
+	servers := 3
+	clients := 12
+	fmt.Printf("servers: %v, clients: %v\n", servers, clients)
+	GenericTest(t, "3B", clients, servers, false, false, false, 1000, true)
 }

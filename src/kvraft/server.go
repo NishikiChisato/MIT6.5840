@@ -36,7 +36,6 @@ type Op struct {
 type OperationResult struct {
 	RetValue string
 	ErrMsg   Err
-	Term     int
 }
 
 type KVInterface interface {
@@ -99,33 +98,39 @@ type KVServer struct {
 	cliSeqNumber map[int64]int
 	cliHistory   map[int64]string
 	opChan       map[int]*chan OperationResult
-	// the size of forward buffer should big enough
-	forwardCh chan raft.ApplyMsg
 
 	persister *raft.Persister
 	// for all msg.commitIndex <= snapshotIndex, log entries are stored in snapshot
 	snapshotIndex int
+
+	getCond sync.Cond
+	doGet   bool
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 
 	DebugPrintf(dInfo, "S%d receive Get(seq: %v, key: %v)", kv.me, args.SeqNumber, args.Key)
-	ok := kv.rf.ReadStart()
+	rerr := kv.rf.ReadStart()
 
-	if !ok {
-		reply.Err = ErrWrongLeader
+	if rerr != OK {
+		DebugPrintf(dError, "S%d with cmd(Get: key: %v, seq: %v) return due to %v", kv.me, args.Key, args.SeqNumber, rerr)
+		reply.Err = Err(rerr)
 		return
 	}
-	DebugPrintf(dInfo, "S%d receive cmd(Get: key: %v, seq: %v)", kv.me, args.Key, args.SeqNumber)
 
+	// the speed of commitment in Raft layer is faster than the speed of processing log in KV Store layer
+	// we specify the distence which is less than 10 is satified(in some rare scenario, error may occur, though)
 	kv.mu.RLock()
+	for !kv.doGet {
+		kv.getCond.Wait()
+	}
 	val, err := kv.ikv.Get(args.Key)
 	kv.mu.RUnlock()
 
 	reply.Value = val
 	reply.Err = err
-	DebugPrintf(dInfo, "S%d respond cmd(Get: key: %v, seq: %v) with %+v", kv.me, args.Key, args.SeqNumber, reply)
+	DebugPrintf(dInfo, "S%d respond cmd(Get: key: %v, seq: %v)", kv.me, args.Key, args.SeqNumber)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -171,32 +176,40 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	select {
 	case res := <-ch:
 		DebugPrintf(dLog, "S%d(term: %v) receive result(seq: %v) from channle", kv.me, term, cmd.SeqNumber)
-		if res.Term == term {
-			reply.Err = res.ErrMsg
-		} else {
-			reply.Err = ErrNotMajority
-		}
-	case <-time.After(time.Millisecond * time.Duration(1000)):
+		reply.Err = res.ErrMsg
+	case <-time.After(time.Millisecond * time.Duration(300)):
 		reply.Err = ErrNotMajority
 	}
 }
 
-func (kv *KVServer) forward() {
+func (kv *KVServer) getCondition() {
 	for !kv.killed() {
-		msg := <-kv.applyCh
-		kv.forwardCh <- msg
+		if !kv.doGet && len(kv.applyCh) < 1 {
+			DebugPrintf(dInfo, "S%d len: %v\n", kv.me, len(kv.applyCh))
+			kv.mu.Lock()
+			kv.doGet = true
+			kv.mu.Unlock()
+
+			kv.getCond.Broadcast()
+		} else if kv.doGet && len(kv.applyCh) >= 1 {
+			DebugPrintf(dInfo, "S%d len: %v\n", kv.me, len(kv.applyCh))
+			kv.mu.Lock()
+			kv.doGet = false
+			kv.mu.Unlock()
+		}
+		time.Sleep(time.Millisecond * 25)
 	}
 }
 
 func (kv *KVServer) readFromRaft() {
 	for !kv.killed() {
-		msg := <-kv.forwardCh
+		msg := <-kv.applyCh
 
 		if msg.CommandValid {
 			if msg.Command == nil {
 				continue
 			}
-			DebugPrintf(dCommit, "S%d receive msg(seq: %v) from raft", kv.me, msg.Command.(Op).SeqNumber)
+			DebugPrintf(dCommit, "S%d receive msg(seq: %v, ide: %v) from raft", kv.me, msg.Command.(Op).SeqNumber, msg.Command.(Op).Identifier)
 			cmd := msg.Command.(Op)
 			result := OperationResult{}
 			// since raft log doesn't strictly map to operations applied to KVServer, so we should pre-judge whether the current log is applied to KVServer or not
@@ -204,9 +217,6 @@ func (kv *KVServer) readFromRaft() {
 			kv.mu.Lock()
 			if cmd.SeqNumber > kv.cliSeqNumber[cmd.Identifier] && msg.CommandIndex > kv.snapshotIndex {
 				switch cmd.Type {
-				case "Get":
-					val, Err := kv.ikv.Get(cmd.Key)
-					result.RetValue, result.ErrMsg = val, Err
 				case "Put":
 					result.ErrMsg = kv.ikv.Put(cmd.Key, cmd.Value)
 				case "Append":
@@ -225,15 +235,12 @@ func (kv *KVServer) readFromRaft() {
 				}
 			}
 
-			if term, isLeader := kv.rf.GetState(); isLeader {
-				if kv.opChan[msg.CommandIndex] != nil && *kv.opChan[msg.CommandIndex] != nil {
-					DebugPrintf(dLeader, "S%d send cmd(seq: %v) to channel", kv.me, cmd.SeqNumber)
+			if kv.opChan[msg.CommandIndex] != nil {
+				DebugPrintf(dLeader, "S%d send cmd(seq: %v) to channel", kv.me, cmd.SeqNumber)
 
-					result.Term = term
-					*kv.opChan[msg.CommandIndex] <- result
-				} else {
-					DebugPrintf(dError, "S%d(replicate side) channel close", kv.me)
-				}
+				*kv.opChan[msg.CommandIndex] <- result
+			} else {
+				DebugPrintf(dError, "S%d(replicate side) channel close", kv.me)
 			}
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
@@ -244,6 +251,7 @@ func (kv *KVServer) readFromRaft() {
 			kv.snapshotIndex = max(kv.snapshotIndex, msg.SnapshotIndex)
 			kv.mu.Unlock()
 		}
+
 	}
 }
 
@@ -345,7 +353,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 10240)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
@@ -354,11 +362,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.cliSeqNumber = make(map[int64]int)
 	kv.opChan = make(map[int]*chan OperationResult)
 	kv.cliHistory = make(map[int64]string)
-	kv.forwardCh = make(chan raft.ApplyMsg, 10240)
 	kv.readRaftSnapshot(persister.ReadSnapshot())
+	kv.getCond = *sync.NewCond(kv.mu.RLocker())
 
 	go kv.readFromRaft()
-	go kv.forward()
+	go kv.getCondition()
 
 	return kv
 }

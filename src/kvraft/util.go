@@ -26,7 +26,7 @@ const (
 )
 
 // Debugging
-var debug int = 1
+var debug int = 0
 var DDebug bool = true
 var TDebug bool = false
 var CDebug bool = true
@@ -50,7 +50,7 @@ func getVerbosity() int {
 }
 
 func init() {
-	debugVerbosity = getVerbosity()
+	debug = getVerbosity()
 	debugStart = time.Now()
 
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
