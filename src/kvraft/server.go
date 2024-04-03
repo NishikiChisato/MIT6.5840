@@ -102,15 +102,22 @@ type KVServer struct {
 	persister *raft.Persister
 	// for all msg.commitIndex <= snapshotIndex, log entries are stored in snapshot
 	snapshotIndex int
-
-	getCond sync.Cond
-	doGet   bool
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 
+	kv.mu.RLock()
+	if kv.cliSeqNumber[args.Identifier] >= args.SeqNumber {
+		reply.Value = kv.cliHistory[args.Identifier]
+		reply.Err = OK
+		kv.mu.RUnlock()
+		return
+	}
+	kv.mu.RUnlock()
+
 	DebugPrintf(dInfo, "S%d receive Get(seq: %v, key: %v)", kv.me, args.SeqNumber, args.Key)
+
 	rerr := kv.rf.ReadStart()
 
 	if rerr != OK {
@@ -119,14 +126,18 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
+	// sleep until preceding logs have been applied to internal KV
+	for len(kv.applyCh) != 0 {
+		time.Sleep(time.Millisecond * 10)
+	}
+
 	// the speed of commitment in Raft layer is faster than the speed of processing log in KV Store layer
 	// we specify the distence which is less than 10 is satified(in some rare scenario, error may occur, though)
-	kv.mu.RLock()
-	for !kv.doGet {
-		kv.getCond.Wait()
-	}
+	kv.mu.Lock()
 	val, err := kv.ikv.Get(args.Key)
-	kv.mu.RUnlock()
+	kv.cliSeqNumber[args.Identifier] = args.SeqNumber
+	kv.cliHistory[args.Identifier] = val
+	kv.mu.Unlock()
 
 	reply.Value = val
 	reply.Err = err
@@ -179,25 +190,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = res.ErrMsg
 	case <-time.After(time.Millisecond * time.Duration(300)):
 		reply.Err = ErrNotMajority
-	}
-}
-
-func (kv *KVServer) getCondition() {
-	for !kv.killed() {
-		if !kv.doGet && len(kv.applyCh) < 1 {
-			DebugPrintf(dInfo, "S%d len: %v\n", kv.me, len(kv.applyCh))
-			kv.mu.Lock()
-			kv.doGet = true
-			kv.mu.Unlock()
-
-			kv.getCond.Broadcast()
-		} else if kv.doGet && len(kv.applyCh) >= 1 {
-			DebugPrintf(dInfo, "S%d len: %v\n", kv.me, len(kv.applyCh))
-			kv.mu.Lock()
-			kv.doGet = false
-			kv.mu.Unlock()
-		}
-		time.Sleep(time.Millisecond * 25)
 	}
 }
 
@@ -281,7 +273,7 @@ func (kv *KVServer) snapshot(idx int) {
 	enc.Encode(&snapshot)
 
 	DebugPrintf(dPersist, "S%d persist state at %v(rf state sz: %v)", kv.me, idx, kv.persister.RaftStateSize())
-	kv.rf.SyncSnapshot(idx, buf.Bytes())
+	kv.rf.Snapshot(idx, buf.Bytes())
 }
 
 func (kv *KVServer) readRaftSnapshot(data []byte) {
@@ -353,7 +345,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
-	kv.applyCh = make(chan raft.ApplyMsg, 10240)
+	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
@@ -363,10 +355,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.opChan = make(map[int]*chan OperationResult)
 	kv.cliHistory = make(map[int64]string)
 	kv.readRaftSnapshot(persister.ReadSnapshot())
-	kv.getCond = *sync.NewCond(kv.mu.RLocker())
 
 	go kv.readFromRaft()
-	go kv.getCondition()
 
 	return kv
 }

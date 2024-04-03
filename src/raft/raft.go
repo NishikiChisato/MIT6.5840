@@ -622,9 +622,12 @@ func (rf *Raft) ReadStart() string {
 	rf.mu.Unlock()
 
 	// election timeout ranges from 250ms to 650ms
-	leaseDuration := time.Millisecond * 200
+	leaseDuration := time.Millisecond * 150
 	if (leaseMeta.isWork && time.Since(leaseMeta.start) > leaseDuration) || !leaseMeta.isWork {
 		isMajority := rf.heartbeatMessage()
+		if isMajority == nil {
+			return ErrNotMajority
+		}
 		if ok := <-isMajority; !ok {
 			// ReadIndex optimization
 			return ErrNotMajority
@@ -636,6 +639,10 @@ func (rf *Raft) ReadStart() string {
 		rf.mu.Lock()
 		// fmt.Printf("LA: %v, RI: %v\n", rf.lastApplied, readIndex)
 		if rf.lastApplied >= readIndex {
+			if rf.state != Leader {
+				rf.mu.Unlock()
+				return ErrWrongLeader
+			}
 			rf.mu.Unlock()
 			return OK
 		}
